@@ -68,7 +68,12 @@ def download_video(url: str, workdir: Path) -> Path:
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
+        # prepare_filename() can report the wrong extension once yt-dlp
+        # merges separate video+audio streams (yt-dlp issue #5517) -
+        # requested_downloads[]['filepath'] is the path the merger
+        # actually renamed its output to, so prefer that when present.
+        requested = info.get("requested_downloads") or []
+        filename = requested[0]["filepath"] if requested else ydl.prepare_filename(info)
     return Path(filename)
 
 
