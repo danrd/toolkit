@@ -14,7 +14,7 @@ extract_slides.py
     pip install yt-dlp scenedetect[opencv] imagehash pillow
 
 Использование:
-    python extract_slides.py "https://youtu.be/uDKEIoBG5w0" -o slides/
+    python scientific/extract_slides.py "https://youtu.be/uDKEIoBG5w0" -o slides/
 
 Опции:
     -o, --output       папка для результатов (по умолчанию ./slides)
