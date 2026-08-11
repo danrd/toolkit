@@ -421,6 +421,35 @@ def test_scan_log_for_errors_returns_empty_when_log_missing(tmp_path):
     assert _scan_log_for_errors(str(tmp_path / "missing.log")) == []
 
 
+def test_scan_log_for_errors_ignores_raise_exception_in_chat_template_dumps(tmp_path):
+    """Qwen's chat template calls a Jinja raise_exception() helper on
+    malformed input - normal template source, not an actual error - and
+    llama.cpp/vLLM dump it verbatim into startup logs (metadata dumps,
+    template debug output). A plain substring search on "exception" lit up
+    on every one of those lines."""
+    log_path = tmp_path / "server.log"
+    log_path.write_text(
+        "INFO: starting up\n"
+        "        {{- raise_exception('System message cannot contain images.') }}\n"
+        "            {{- raise_exception('Unexpected item type in content.') }}\n"
+        "INFO: ready\n"
+    )
+
+    assert _scan_log_for_errors(str(log_path)) == []
+
+
+def test_scan_log_for_errors_ignores_long_lines(tmp_path):
+    """A many-KB single-line metadata/config dump can coincidentally
+    contain a matching word without being an actual error - real
+    error/traceback lines are short."""
+    log_path = tmp_path / "server.log"
+    long_line = "Model metadata: {" + "'k': 'v', " * 100 + "'note': 'a real error occurred here'}"
+    assert len(long_line) > 300
+    log_path.write_text(f"INFO: starting up\n{long_line}\nINFO: ready\n")
+
+    assert _scan_log_for_errors(str(log_path)) == []
+
+
 def test_report_runner_started_prints_key_params(capsys):
     config = SimpleNamespace(
         base=BaseConfig(device="gpu"),

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -290,7 +291,14 @@ def setup_llama_cpp_model(model_path: str, config=None, tokenizer_id: Optional[s
 # a server-load-time setting (llama.cpp) or a per-request extra_body field
 # (vLLM's OpenAI-compatible server); every in-process tier just ignores it.
 _CHAT_TEMPLATE_KWARGS_TIERS = {"llama.cpp server", "vLLM server"}
-_LOG_ERROR_MARKERS = ("error", "traceback", "exception", "out of memory")
+_LOG_ERROR_PATTERN = re.compile(r"\b(error|exception|traceback|out of memory)\b", re.IGNORECASE)
+# A genuine error/traceback line is short. A model's chat template is
+# itself full of matching words - Qwen's, for instance, calls a Jinja
+# raise_exception() helper on malformed input - and gets dumped verbatim
+# into startup logs (metadata dumps, template debug output); capping line
+# length keeps that noise out without needing to special-case any one
+# framework's dump format.
+_LOG_ERROR_MAX_LINE_LENGTH = 300
 
 
 def _scan_log_for_errors(log_path: str, max_lines: int = 10) -> List[str]:
@@ -305,7 +313,7 @@ def _scan_log_for_errors(log_path: str, max_lines: int = 10) -> List[str]:
     except OSError:
         return []
     hits = [line.rstrip("\n") for line in lines
-            if any(marker in line.lower() for marker in _LOG_ERROR_MARKERS)]
+            if len(line) <= _LOG_ERROR_MAX_LINE_LENGTH and _LOG_ERROR_PATTERN.search(line)]
     return hits[:max_lines]
 
 
