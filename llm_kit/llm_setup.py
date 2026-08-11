@@ -84,6 +84,8 @@ class LlmConfig(BaseModel):
     use_mlock: bool = True
     n_gpu_layers: int = 0
     tensor_parallel_size: int = 1  # vLLM: shard the model across this many GPUs
+    gpu_memory_utilization: Optional[float] = None  # vLLM: fraction of VRAM to reserve (default 0.9)
+    enforce_eager: bool = False  # vLLM: skip CUDA graph capture - trades latency for headroom on tight-VRAM cards
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +198,15 @@ def _start_vllm_server(config) -> subprocess.Popen:
     max_context = getattr(config.llm, "max_context", None)
     if max_context:
         args += ["--max-model-len", str(max_context)]
+    gpu_memory_utilization = getattr(config.llm, "gpu_memory_utilization", None)
+    if gpu_memory_utilization:
+        args += ["--gpu-memory-utilization", str(gpu_memory_utilization)]
+    # CUDA graph capture (vLLM's default) reserves its own scratch memory on
+    # top of weights + KV cache, sized independently of max-model-len - on a
+    # card with little headroom past the weights, that capture pass itself
+    # can be the thing that OOMs, not the KV cache it's meant to speed up.
+    if getattr(config.llm, "enforce_eager", False):
+        args += ["--enforce-eager"]
 
     process = subprocess.Popen(
         args,
@@ -338,6 +349,8 @@ def _build_gpu_runner(config) -> BaseRunner:
             model=config.llm.model,
             tensor_parallel_size=getattr(config.llm, "tensor_parallel_size", 1),
             max_model_len=getattr(config.llm, "max_context", None),
+            gpu_memory_utilization=getattr(config.llm, "gpu_memory_utilization", None) or 0.9,
+            enforce_eager=getattr(config.llm, "enforce_eager", False),
         )
         return VLLMRunner(llm, config.to_vllm())
     except Exception as e:

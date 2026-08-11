@@ -277,3 +277,56 @@ def test_start_vllm_server_omits_max_model_len_when_falsy(tmp_path, monkeypatch)
 
     args = mock_popen.call_args[0][0]
     assert "--max-model-len" not in args
+
+
+def test_start_vllm_server_passes_gpu_memory_utilization_when_set(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(sys.modules, "vllm", SimpleNamespace())
+    config = _fake_vllm_config(gpu_memory_utilization=0.85)
+
+    with patch("subprocess.Popen") as mock_popen:
+        _start_vllm_server(config)
+
+    args = mock_popen.call_args[0][0]
+    assert "--gpu-memory-utilization" in args
+    assert args[args.index("--gpu-memory-utilization") + 1] == "0.85"
+
+
+def test_start_vllm_server_omits_gpu_memory_utilization_by_default(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(sys.modules, "vllm", SimpleNamespace())
+    config = _fake_vllm_config()
+
+    with patch("subprocess.Popen") as mock_popen:
+        _start_vllm_server(config)
+
+    args = mock_popen.call_args[0][0]
+    assert "--gpu-memory-utilization" not in args
+
+
+def test_start_vllm_server_passes_enforce_eager_when_set(tmp_path, monkeypatch):
+    """CUDA graph capture reserves its own scratch memory independently of
+    max-model-len - on a card with little headroom past the weights, that
+    capture pass itself can be the thing that OOMs, not the KV cache it's
+    meant to speed up. --enforce-eager skips it entirely."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(sys.modules, "vllm", SimpleNamespace())
+    config = _fake_vllm_config(enforce_eager=True)
+
+    with patch("subprocess.Popen") as mock_popen:
+        _start_vllm_server(config)
+
+    args = mock_popen.call_args[0][0]
+    assert "--enforce-eager" in args
+
+
+def test_start_vllm_server_omits_enforce_eager_by_default(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(sys.modules, "vllm", SimpleNamespace())
+    config = _fake_vllm_config()
+
+    with patch("subprocess.Popen") as mock_popen:
+        _start_vllm_server(config)
+
+    args = mock_popen.call_args[0][0]
+    assert "--enforce-eager" not in args
