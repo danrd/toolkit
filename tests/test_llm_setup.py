@@ -274,6 +274,26 @@ def test_build_cpu_runner_uses_default_server_ready_timeout_when_unset(tmp_path,
     assert mock_wait.call_args.kwargs["timeout"] == 60.0
 
 
+def test_build_cpu_runner_passes_request_timeout_to_server_runner(tmp_path, monkeypatch):
+    """The openai client's own default request timeout (600s) is tuned for
+    a hosted API - CPU inference of a large local model can run past that
+    on a single generate() call well before anything is actually wrong, so
+    config.base.request_timeout has to make it all the way to ServerRunner."""
+    monkeypatch.chdir(tmp_path)
+    config = SimpleNamespace(base=BaseConfig(request_timeout=120.0),
+                              llm=SimpleNamespace(model="fake/model", quant_file=""),
+                              generation=SimpleNamespace(chat_template_kwargs={}),
+                              to_chat_completions=lambda: {})
+    fake_process = SimpleNamespace(log_file=SimpleNamespace(name="llama_cpp.log"))
+
+    with patch("llm_kit.llm_setup._start_llama_cpp_server", return_value=fake_process), \
+         patch("llm_kit.llm_setup._wait_for_server_ready", return_value=True), \
+         patch("llm_kit.llm_setup.ServerRunner") as mock_server_runner:
+        _build_cpu_runner(config)
+
+    assert mock_server_runner.call_args.kwargs["request_timeout"] == 120.0
+
+
 def test_build_gpu_runner_health_check_failure_reports_timeout_and_log_file(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     config = SimpleNamespace(base=SimpleNamespace(device="gpu", server_ready_timeout=5.0),

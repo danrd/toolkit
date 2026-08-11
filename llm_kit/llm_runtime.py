@@ -237,18 +237,26 @@ class ServerRunner(BaseRunner):
     other backend just consumes the string directly."""
 
     def __init__(self, process: Optional[subprocess.Popen], port: int,
-                 model_name: str, generation_kwargs: Dict[str, Any], client=None):
+                 model_name: str, generation_kwargs: Dict[str, Any],
+                 request_timeout: float = 600.0, client=None):
         self.process = process
         self.port = port
         self.model_name = model_name
         self.generation_kwargs = generation_kwargs
+        self.request_timeout = request_timeout
         self._client = client  # allows injecting a fake client for testing
 
     @property
     def client(self):
         if self._client is None:
             from openai import OpenAI
-            self._client = OpenAI(base_url=f"http://127.0.0.1:{self.port}/v1", api_key="not-needed")
+            # The openai client's own default (600s) is tuned for a hosted
+            # API - CPU-only inference of a large local model can run well
+            # past that on a single request, well before anything is
+            # actually wrong, so this needs to be a config-level knob
+            # rather than left at the library default.
+            self._client = OpenAI(base_url=f"http://127.0.0.1:{self.port}/v1", api_key="not-needed",
+                                   timeout=self.request_timeout)
         return self._client
 
     def generate(self, prompt: str) -> str:
