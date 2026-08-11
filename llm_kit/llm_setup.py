@@ -189,6 +189,13 @@ def _start_vllm_server(config) -> subprocess.Popen:
     tensor_parallel_size = getattr(config.llm, "tensor_parallel_size", 1)
     if tensor_parallel_size and tensor_parallel_size != 1:
         args += ["--tensor-parallel-size", str(tensor_parallel_size)]
+    # Without this, vLLM sizes its memory-profiling pass (and the KV cache
+    # it then reserves) for the model's own native max context - 262144
+    # for some checkpoints - which is a CUDA OOM on anything but the
+    # largest cards regardless of how the weights themselves fit.
+    max_context = getattr(config.llm, "max_context", None)
+    if max_context:
+        args += ["--max-model-len", str(max_context)]
 
     process = subprocess.Popen(
         args,
@@ -327,7 +334,11 @@ def _build_gpu_runner(config) -> BaseRunner:
 
     try:
         from vllm import LLM
-        llm = LLM(model=config.llm.model, tensor_parallel_size=getattr(config.llm, "tensor_parallel_size", 1))
+        llm = LLM(
+            model=config.llm.model,
+            tensor_parallel_size=getattr(config.llm, "tensor_parallel_size", 1),
+            max_model_len=getattr(config.llm, "max_context", None),
+        )
         return VLLMRunner(llm, config.to_vllm())
     except Exception as e:
         errors.append(f"vLLM in-process: {type(e).__name__}: {e}")

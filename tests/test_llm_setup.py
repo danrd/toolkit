@@ -248,3 +248,32 @@ def test_start_vllm_server_omits_tensor_parallel_size_by_default(tmp_path, monke
 
     args = mock_popen.call_args[0][0]
     assert "--tensor-parallel-size" not in args
+
+
+def test_start_vllm_server_passes_max_model_len_from_max_context(tmp_path, monkeypatch):
+    """Without --max-model-len, vLLM sizes its memory-profiling pass (and
+    the KV cache it reserves) for the model's own native max context -
+    which can be far larger than the card actually has room for,
+    regardless of how the weights themselves fit."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(sys.modules, "vllm", SimpleNamespace())
+    config = _fake_vllm_config(max_context=32000)
+
+    with patch("subprocess.Popen") as mock_popen:
+        _start_vllm_server(config)
+
+    args = mock_popen.call_args[0][0]
+    assert "--max-model-len" in args
+    assert args[args.index("--max-model-len") + 1] == "32000"
+
+
+def test_start_vllm_server_omits_max_model_len_when_falsy(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(sys.modules, "vllm", SimpleNamespace())
+    config = _fake_vllm_config(max_context=0)
+
+    with patch("subprocess.Popen") as mock_popen:
+        _start_vllm_server(config)
+
+    args = mock_popen.call_args[0][0]
+    assert "--max-model-len" not in args
