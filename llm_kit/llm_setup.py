@@ -275,6 +275,67 @@ def setup_llama_cpp_model(model_path: str, config=None, tokenizer_id: Optional[s
 
 
 # ---------------------------------------------------------------------------
+# Startup reporting
+# ---------------------------------------------------------------------------
+
+# The only tiers that actually apply generation.chat_template_kwargs - it's
+# a server-load-time setting (llama.cpp) or a per-request extra_body field
+# (vLLM's OpenAI-compatible server); every in-process tier just ignores it.
+_CHAT_TEMPLATE_KWARGS_TIERS = {"llama.cpp server", "vLLM server"}
+_LOG_ERROR_MARKERS = ("error", "traceback", "exception", "out of memory")
+
+
+def _scan_log_for_errors(log_path: str, max_lines: int = 10) -> List[str]:
+    """Grep a tier's own log file for error-looking lines. A tier can pass
+    its health check (or construct without raising) while its log already
+    has something worth reading - a worker that crashed and restarted, a
+    warning that presages a later failure - otherwise invisible unless
+    someone opens the log by hand."""
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return []
+    hits = [line.rstrip("\n") for line in lines
+            if any(marker in line.lower() for marker in _LOG_ERROR_MARKERS)]
+    return hits[:max_lines]
+
+
+def _report_runner_started(tier: str, config, process: Optional[subprocess.Popen] = None) -> None:
+    """Print which tier actually started and with what parameters.
+    build_runner's fallback chain can silently land on a simpler tier than
+    the one intended - a tier "succeeding" says nothing about whether it's
+    the one you meant to get, whether it honors settings only some tiers
+    support (e.g. chat_template_kwargs), or whether its own log already
+    has something worth reading."""
+    params = {
+        "framework": getattr(config.llm, "framework", None),
+        "model": getattr(config.llm, "model", None),
+        "device": getattr(config.base, "device", None),
+        "tensor_parallel_size": getattr(config.llm, "tensor_parallel_size", None),
+        "max_context": getattr(config.llm, "max_context", None),
+        "gpu_memory_utilization": getattr(config.llm, "gpu_memory_utilization", None),
+        "enforce_eager": getattr(config.llm, "enforce_eager", None),
+    }
+    print(f"[llm_setup] Started via {tier}: " +
+          ", ".join(f"{k}={v}" for k, v in params.items() if v is not None))
+
+    generation = getattr(config, "generation", None)
+    chat_template_kwargs = getattr(generation, "chat_template_kwargs", None) if generation is not None else None
+    if chat_template_kwargs and tier not in _CHAT_TEMPLATE_KWARGS_TIERS:
+        print(f"[llm_setup] WARNING: generation.chat_template_kwargs={chat_template_kwargs} "
+              f"is only applied by the server tiers - {tier} ignores it silently.")
+
+    if process is not None and getattr(process, "log_file", None):
+        errors = _scan_log_for_errors(process.log_file.name)
+        if errors:
+            print(f"[llm_setup] WARNING: {process.log_file.name} contains "
+                  f"{len(errors)} error-looking line(s) despite starting successfully:")
+            for line in errors:
+                print(f"    {line}")
+
+
+# ---------------------------------------------------------------------------
 # Factory: local inference, with fallback chain
 #
 # Each tier passes `config` straight to ExperimentConfig.to_llama_cpp() /
@@ -306,6 +367,7 @@ def _build_cpu_runner(config) -> BaseRunner:
     try:
         process = _start_llama_cpp_server(config)
         if _wait_for_server_ready(process, port, timeout=server_ready_timeout):
+            _report_runner_started("llama.cpp server", config, process=process)
             return ServerRunner(process, port, config.llm.model, config.to_chat_completions())
         _terminate_process(process)
         errors.append(
@@ -318,6 +380,7 @@ def _build_cpu_runner(config) -> BaseRunner:
 
     try:
         model, _ = setup_llama_cpp_model(resolve_local_model_path(config), config=config)
+        _report_runner_started("llama.cpp in-process", config)
         return LlamaCppRunner(model, config.to_llama_cpp())
     except Exception as e:
         errors.append(f"llama.cpp in-process: {type(e).__name__}: {e}")
@@ -333,6 +396,7 @@ def _build_gpu_runner(config) -> BaseRunner:
     try:
         process = _start_vllm_server(config)
         if _wait_for_server_ready(process, port, timeout=server_ready_timeout):
+            _report_runner_started("vLLM server", config, process=process)
             return ServerRunner(process, port, config.llm.model, config.to_chat_completions())
         _terminate_process(process)
         errors.append(
@@ -352,12 +416,14 @@ def _build_gpu_runner(config) -> BaseRunner:
             gpu_memory_utilization=getattr(config.llm, "gpu_memory_utilization", None) or 0.9,
             enforce_eager=getattr(config.llm, "enforce_eager", False),
         )
+        _report_runner_started("vLLM in-process", config)
         return VLLMRunner(llm, config.to_vllm())
     except Exception as e:
         errors.append(f"vLLM in-process: {type(e).__name__}: {e}")
 
     try:
         model, tokenizer = setup_hf_model(config.llm.model)
+        _report_runner_started("HF in-process", config)
         return HFRunner(model, tokenizer, config.to_hf())
     except Exception as e:
         errors.append(f"HF in-process: {type(e).__name__}: {e}")

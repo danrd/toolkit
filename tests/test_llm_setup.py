@@ -13,6 +13,8 @@ from llm_kit.llm_setup import (
     LlmConfig,
     _build_cpu_runner,
     _build_gpu_runner,
+    _report_runner_started,
+    _scan_log_for_errors,
     _start_llama_cpp_server,
     _start_vllm_server,
     resolve_local_model_path,
@@ -318,6 +320,91 @@ def test_start_vllm_server_passes_enforce_eager_when_set(tmp_path, monkeypatch):
 
     args = mock_popen.call_args[0][0]
     assert "--enforce-eager" in args
+
+
+def test_scan_log_for_errors_finds_error_looking_lines(tmp_path):
+    log_path = tmp_path / "server.log"
+    log_path.write_text(
+        "INFO: starting up\n"
+        "ERROR: worker crashed\n"
+        "INFO: retrying\n"
+        "Traceback (most recent call last):\n"
+    )
+
+    hits = _scan_log_for_errors(str(log_path))
+
+    assert hits == ["ERROR: worker crashed", "Traceback (most recent call last):"]
+
+
+def test_scan_log_for_errors_returns_empty_for_clean_log(tmp_path):
+    log_path = tmp_path / "server.log"
+    log_path.write_text("INFO: starting up\nINFO: ready\n")
+
+    assert _scan_log_for_errors(str(log_path)) == []
+
+
+def test_scan_log_for_errors_returns_empty_when_log_missing(tmp_path):
+    assert _scan_log_for_errors(str(tmp_path / "missing.log")) == []
+
+
+def test_report_runner_started_prints_key_params(capsys):
+    config = SimpleNamespace(
+        base=BaseConfig(device="gpu"),
+        llm=LlmConfig(tensor_parallel_size=2, max_context=9000),
+        generation=SimpleNamespace(chat_template_kwargs={}),
+    )
+
+    _report_runner_started("vLLM server", config)
+
+    out = capsys.readouterr().out
+    assert "vLLM server" in out
+    assert "tensor_parallel_size=2" in out
+    assert "max_context=9000" in out
+
+
+def test_report_runner_started_warns_when_chat_template_kwargs_unsupported_by_tier(capsys):
+    """chat_template_kwargs only takes effect on the server tiers - a
+    fallback to an in-process tier silently ignoring it (the reasoning
+    toggle staying on with no error anywhere) is exactly the kind of thing
+    this warning exists to surface."""
+    config = SimpleNamespace(
+        base=BaseConfig(device="cpu"),
+        llm=LlmConfig(),
+        generation=SimpleNamespace(chat_template_kwargs={"enable_thinking": False}),
+    )
+
+    _report_runner_started("llama.cpp in-process", config)
+
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert "chat_template_kwargs" in out
+
+
+def test_report_runner_started_does_not_warn_for_server_tier(capsys):
+    config = SimpleNamespace(
+        base=BaseConfig(device="cpu"),
+        llm=LlmConfig(),
+        generation=SimpleNamespace(chat_template_kwargs={"enable_thinking": False}),
+    )
+
+    _report_runner_started("llama.cpp server", config)
+
+    out = capsys.readouterr().out
+    assert "WARNING" not in out
+
+
+def test_report_runner_started_surfaces_errors_already_in_the_log(tmp_path, capsys):
+    log_path = tmp_path / "vllm_server.log"
+    log_path.write_text("INFO: booting\nERROR: CUDA out of memory\n")
+    process = SimpleNamespace(log_file=SimpleNamespace(name=str(log_path)))
+    config = SimpleNamespace(base=BaseConfig(device="gpu"), llm=LlmConfig(),
+                              generation=SimpleNamespace(chat_template_kwargs={}))
+
+    _report_runner_started("vLLM server", config, process=process)
+
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert "ERROR: CUDA out of memory" in out
 
 
 def test_start_vllm_server_omits_enforce_eager_by_default(tmp_path, monkeypatch):
