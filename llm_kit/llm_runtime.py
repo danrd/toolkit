@@ -177,18 +177,26 @@ class GenerationConfig(BaseModel):
             "max_tokens": self.max_tokens,
             "top_p": self.top_p,
             "stop": self.stop if self.stop else None,
-            "repetition_penalty": self.repetition_penalty,
             "frequency_penalty": self.frequency_penalty,
         }
-
-        if self.top_k != -1:
-            params["top_k"] = self.top_k
 
         if seed is not None:
             params["seed"] = seed
 
+        # top_k, repetition_penalty, and chat_template_kwargs aren't part of
+        # the official Chat Completions schema - the openai client's
+        # chat.completions.create() rejects unrecognized keyword arguments
+        # before a request is even sent. vLLM (and other OpenAI-compatible
+        # servers) accept them as vendor extensions via extra_body instead.
+        extra_body: Dict[str, Any] = {}
+        if self.top_k != -1:
+            extra_body["top_k"] = self.top_k
+        if self.repetition_penalty != 1.0:
+            extra_body["repetition_penalty"] = self.repetition_penalty
         if self.chat_template_kwargs:
-            params["extra_body"] = {"chat_template_kwargs": self.chat_template_kwargs}
+            extra_body["chat_template_kwargs"] = self.chat_template_kwargs
+        if extra_body:
+            params["extra_body"] = extra_body
 
         return {k: v for k, v in params.items() if v is not None}
 
