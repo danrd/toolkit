@@ -18,6 +18,7 @@ from llm_kit.llm_setup import (
     _start_llama_cpp_server,
     _start_vllm_server,
     resolve_local_model_path,
+    setup_llama_cpp_model,
 )
 
 
@@ -106,6 +107,79 @@ def test_start_llama_cpp_server_omits_chat_template_kwargs_when_unset(tmp_path, 
 
     args = mock_popen.call_args[0][0]
     assert "--chat_template_kwargs" not in args
+
+
+def test_start_llama_cpp_server_uses_explicit_n_ctx_when_set(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    config = _fake_server_config(tmp_path)
+    config.llm.n_ctx = 4096
+
+    with patch("subprocess.Popen") as mock_popen:
+        _start_llama_cpp_server(config)
+
+    args = mock_popen.call_args[0][0]
+    assert args[args.index("--n_ctx") + 1] == "4096"
+
+
+def test_start_llama_cpp_server_falls_back_to_max_context_when_n_ctx_unset(tmp_path, monkeypatch):
+    """max_context - not generation.max_tokens - is the knob meant to size
+    the context window; generation.max_tokens caps how much a single
+    response generates, not how much context the model can hold, and
+    falling back to it directly silently starves real prompts of context
+    room unless n_ctx is set by hand."""
+    monkeypatch.chdir(tmp_path)
+    config = _fake_server_config(tmp_path)
+    config.llm.max_context = 9000
+
+    with patch("subprocess.Popen") as mock_popen:
+        _start_llama_cpp_server(config)
+
+    args = mock_popen.call_args[0][0]
+    assert args[args.index("--n_ctx") + 1] == "9000"
+
+
+def test_start_llama_cpp_server_falls_back_to_generation_max_tokens_as_last_resort(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    config = _fake_server_config(tmp_path)
+    config.llm.max_context = 0
+
+    with patch("subprocess.Popen") as mock_popen:
+        _start_llama_cpp_server(config)
+
+    args = mock_popen.call_args[0][0]
+    assert args[args.index("--n_ctx") + 1] == "64"
+
+
+def test_setup_llama_cpp_model_falls_back_to_max_context_when_n_ctx_unset(monkeypatch):
+    captured = {}
+
+    class FakeLlama:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setitem(sys.modules, "llama_cpp", SimpleNamespace(Llama=FakeLlama))
+    config = SimpleNamespace(llm=LlmConfig(max_context=9000), base=BaseConfig(),
+                              generation=SimpleNamespace(max_tokens=64))
+
+    setup_llama_cpp_model("fake/path.gguf", config=config)
+
+    assert captured["n_ctx"] == 9000
+
+
+def test_setup_llama_cpp_model_prefers_explicit_n_ctx_over_max_context(monkeypatch):
+    captured = {}
+
+    class FakeLlama:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setitem(sys.modules, "llama_cpp", SimpleNamespace(Llama=FakeLlama))
+    config = SimpleNamespace(llm=LlmConfig(n_ctx=4096, max_context=9000), base=BaseConfig(),
+                              generation=SimpleNamespace(max_tokens=64))
+
+    setup_llama_cpp_model("fake/path.gguf", config=config)
+
+    assert captured["n_ctx"] == 4096
 
 
 def _fake_vllm_config(**llm_overrides):

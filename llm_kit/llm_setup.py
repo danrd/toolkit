@@ -79,7 +79,7 @@ class LlmConfig(BaseModel):
     max_context: int = 9000  # llm token limit for computational resources to control
     openrouter_models: List[str] = ["google/gemma-4-26b-a4b-it",
                                     "nvidia/nemotron-3-ultra-550b-a55b"]
-    n_ctx: Optional[int] = None  # falls back to generation.max_tokens when unset
+    n_ctx: Optional[int] = None  # falls back to max_context, then generation.max_tokens, when unset
     n_tokens_batch: int = 512
     use_mlock: bool = True
     n_gpu_layers: int = 0
@@ -140,7 +140,13 @@ def _start_llama_cpp_server(config) -> subprocess.Popen:
     # CUDA-version-sensitive, so there's no reason to keep installing it at
     # runtime instead of just requiring it ahead of time.
     port = getattr(config.base, "port", 8001)
-    n_ctx = str(getattr(config.llm, "n_ctx", None) or getattr(config.generation, "max_tokens", 2048))
+    # max_context is the knob meant to size the context window; falling
+    # back straight to generation.max_tokens (how many tokens to generate,
+    # not how much context to hold) silently caps it far below what a real
+    # prompt needs unless n_ctx is set by hand.
+    n_ctx = str(getattr(config.llm, "n_ctx", None)
+                or getattr(config.llm, "max_context", None)
+                or getattr(config.generation, "max_tokens", 2048))
     log_file = open("llama_cpp.log", "w", encoding="utf-8")
 
     args = [sys.executable, "-m", "llama_cpp.server", "--model", resolve_local_model_path(config),
@@ -265,7 +271,9 @@ def setup_llama_cpp_model(model_path: str, config=None, tokenizer_id: Optional[s
 
     model = Llama(
         model_path=model_path,
-        n_ctx=getattr(llm_cfg, "n_ctx", None) or getattr(gen_cfg, "max_tokens", 2048),
+        n_ctx=(getattr(llm_cfg, "n_ctx", None)
+               or getattr(llm_cfg, "max_context", None)
+               or getattr(gen_cfg, "max_tokens", 2048)),
         n_batch=getattr(llm_cfg, "n_tokens_batch", 512),
         use_mlock=getattr(llm_cfg, "use_mlock", True),
         n_gpu_layers=getattr(llm_cfg, "n_gpu_layers", 0),
