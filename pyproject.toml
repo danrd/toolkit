@@ -1,0 +1,66 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "toolkit"
+version = "0.1.0"
+description = "Personal collection of independent modules, each installed via its own extra - see README.md."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+llm-kit = [
+    "pydantic",
+    "jinja2",
+    "pandas",
+    "pyyaml",
+]
+llm-kit-llama-cpp = [
+    "llama-cpp-python[server]",
+    # Resolves LlmConfig.model (a GGUF repo id) + quant_file into a real
+    # local file for llama.cpp to load - see resolve_local_model_path().
+    "huggingface_hub",
+]
+llm-kit-vllm = [
+    "vllm>=0.6",
+]
+llm-kit-openrouter = [
+    "openai",
+]
+llm-kit-hf = [
+    "transformers",
+    "torch",
+    # Many HF tokenizers (Llama/Qwen family included) are SentencePiece-based;
+    # AutoTokenizer.from_pretrained() needs this installed to convert them.
+    "sentencepiece",
+]
+llm-kit-logging = [
+    "wandb",
+]
+test = [
+    "pytest",
+    "toolkit[llm-kit,llm-kit-llama-cpp,llm-kit-logging]",
+]
+
+[dependency-groups]
+dev = [
+    "ruff",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["llm_kit"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+# Same rationale as arc-agi's ruff config this was extracted from: pyflakes
+# (undefined names, unused imports/variables) plus a few pycodestyle checks
+# for actual mistakes, not style opinions.
+select = ["E4", "E7", "E9", "F", "W"]
