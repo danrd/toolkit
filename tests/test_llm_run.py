@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+import types
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -247,6 +248,68 @@ def test_run_llm_over_tasks_resume_skips_already_processed_tasks(fake_wandb):
     assert [t.id for t in calls] == ["t2"]  # t1 was skipped - already in the checkpoint
     assert {r["task_id"] for r in summary["results"]} == {"t1", "t2"}
     assert summary["solved_tasks"] == ["t1"]
+
+
+def test_show_progress_prints_score_and_shows_plot_once(fake_wandb, monkeypatch):
+    """result_plotter is built once and reused for both the inline display
+    and the wandb log, and matplotlib is only touched when
+    show_progress+a plotter actually asked for it. matplotlib isn't a
+    llm_kit dependency, so a fake stand-in is installed into sys.modules
+    rather than requiring a real install (same approach as fake_wandb)."""
+    prompts = {"t1": "prompt-1"}
+    generations = {"prompt-1": "CORRECT"}
+    module = _fake_module(prompts, generations)
+
+    calls = []
+
+    def plotter(task, text, eval_result):
+        calls.append(task)
+        return "FIGURE"
+
+    shown = []
+    fake_pyplot = types.SimpleNamespace(show=lambda: shown.append(True))
+    fake_matplotlib = types.SimpleNamespace(pyplot=fake_pyplot)
+    monkeypatch.setitem(sys.modules, "matplotlib", fake_matplotlib)
+    monkeypatch.setitem(sys.modules, "matplotlib.pyplot", fake_pyplot)
+
+    run_llm_over_tasks(
+        tasks=[_FakeTask("t1")], llm_module=module, evaluator=_exact_match_evaluator,
+        result_plotter=plotter,
+        log_config=WandbLogConfig(project="test-proj", log_result_plot=True),
+        show_progress=True,
+    )
+
+    assert len(calls) == 1  # built once, not once-per-destination
+    assert shown == [True]
+
+
+def test_show_progress_prints_the_score_line(fake_wandb, capsys):
+    prompts = {"t1": "prompt-1"}
+    generations = {"prompt-1": "CORRECT"}
+    module = _fake_module(prompts, generations)
+
+    run_llm_over_tasks(
+        tasks=[_FakeTask("t1")], llm_module=module, evaluator=_exact_match_evaluator,
+        log_config=WandbLogConfig(project="test-proj"),
+        show_progress=True,
+    )
+
+    out = capsys.readouterr().out
+    assert "task t1: score=1.000 solved=True" in out
+
+
+def test_show_progress_off_by_default_prints_nothing_about_score(fake_wandb, capsys):
+    prompts = {"t1": "prompt-1"}
+    generations = {"prompt-1": "CORRECT"}
+    module = _fake_module(prompts, generations)
+
+    run_llm_over_tasks(
+        tasks=[_FakeTask("t1")], llm_module=module, evaluator=_exact_match_evaluator,
+        log_config=WandbLogConfig(project="test-proj"),
+    )
+
+    out = capsys.readouterr().out
+    assert "score=" not in out
 
 
 def test_run_llm_over_tasks_resume_with_no_prior_checkpoint_does_not_crash(fake_wandb):

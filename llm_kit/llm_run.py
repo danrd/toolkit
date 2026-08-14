@@ -61,6 +61,7 @@ def run_llm_over_tasks(
     run_name: Optional[str] = None,
     run_description: str = "",
     extra_config: Optional[Dict[str, Any]] = None,
+    show_progress: bool = False,
 ) -> Dict[str, Any]:
     """Run `llm_module` over `tasks`, logging + checkpointing to
     wandb as it goes.
@@ -77,10 +78,16 @@ def run_llm_over_tasks(
         context_builder(task) -> dict: builds the PromptBuilder context for
             one task (e.g. a per-task role instruction). Defaults to {}.
         result_plotter(task, generated_text, eval_result) -> a
-            wandb-loggable object (e.g. a matplotlib figure): only called
-            if log_config.log_result_plot is True.
+            wandb-loggable object (e.g. a matplotlib figure): built once
+            per task whenever either log_config.log_result_plot or
+            show_progress is on, and reused for both - not recomputed per
+            destination.
         run_id: pass the same id as a previous call to resume it - already
             processed task ids are skipped.
+        show_progress: print each task's score as it's scored, and (if
+            result_plotter is set) display its figure inline via
+            plt.show() - live feedback for a notebook-driven run, instead
+            of only being visible later on the wandb dashboard.
 
     Returns {"results": [...], "solved_tasks": [...], "avg_score": float}.
     """
@@ -137,6 +144,16 @@ def run_llm_over_tasks(
         })
         tasks_summary.add_data(str(task_id), eval_result.primary_score, len(prompt))
 
+        fig = None
+        if result_plotter is not None and (show_progress or log_config.log_result_plot):
+            fig = result_plotter(task, generation, eval_result)
+
+        if show_progress:
+            print(f"task {task_id}: score={eval_result.primary_score:.3f} solved={eval_result.solved}")
+            if fig is not None:
+                import matplotlib.pyplot as plt  # lazy: show_progress is opt-in, plotting shouldn't be a hard dependency otherwise
+                plt.show()
+
         if log_config.log_per_task_metrics:
             log_payload = {f"task_{task_id}_{name}": value for name, value in eval_result.metrics.items()}
             log_payload[f"task_{task_id}_processing_time_min"] = processing_time_min
@@ -144,8 +161,8 @@ def run_llm_over_tasks(
             log_payload["summary/total_tasks"] = len(all_results)
             log_payload["summary/avg_primary_score"] = tasks_summary.get_dataframe()["primary_score"].mean()
             log_payload["summary/total_solved"] = len(solved_tasks)
-            if log_config.log_result_plot and result_plotter is not None:
-                log_payload[f"task_{task_id}_result_plot"] = result_plotter(task, generation, eval_result)
+            if log_config.log_result_plot and fig is not None:
+                log_payload[f"task_{task_id}_result_plot"] = fig
             wandb.log(log_payload)
 
         if log_config.log_prompt_artifacts:
