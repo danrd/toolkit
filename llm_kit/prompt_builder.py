@@ -215,14 +215,14 @@ class PromptBuilder:
     def _join(self, parts: "OrderedDict[str, Tuple[BlockSpec, str]]") -> str:
         if self.config.chat_template is None:
             sections = [
-                self._wrap(spec.tag or spec.name.upper(), content) if spec.tag else content
+                self._wrap(spec.tag or spec.name.upper(), content)
                 for spec, content in parts.values()
             ]
             return "\n".join(sections)
 
         role_buckets: Dict[str, list] = {"system": [], "user": []}
         for spec, content in parts.values():
-            wrapped = self._wrap(spec.tag or spec.name.upper(), content) if spec.tag else content
+            wrapped = self._wrap(spec.tag or spec.name.upper(), content)
             role_buckets[spec.role].append(wrapped)
 
         messages = []

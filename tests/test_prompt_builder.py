@@ -13,7 +13,7 @@ import inspect
 import pytest
 from jinja2.exceptions import TemplateAssertionError, UndefinedError
 
-from llm_kit.prompt_builder import PromptBuilder, PromptingConfig
+from llm_kit.prompt_builder import BlockSpec, PromptBuilder, PromptingConfig
 
 
 class _FakeTokenizer:
@@ -48,7 +48,8 @@ def test_prompt_builder_module_has_no_sibling_module_imports():
 
 def test_builds_without_any_registry_when_config_uses_no_resolvers_or_filters(tmp_path):
     _write_block(tmp_path, "greeting", "v1", "Hello, {{ name }}!")
-    config = PromptingConfig(blocks_dir=str(tmp_path), blocks=["greeting"], token_limit=100)
+    config = PromptingConfig(blocks_dir=str(tmp_path), blocks=["greeting"], token_limit=100,
+                              join_format="plain")
 
     builder = PromptBuilder(config, _FakeTokenizer())
     result = builder.build(task=None, context={"name": "world"})
@@ -58,7 +59,7 @@ def test_builds_without_any_registry_when_config_uses_no_resolvers_or_filters(tm
 
 def test_resolver_registry_is_used_when_provided(tmp_path):
     config = PromptingConfig(blocks_dir=str(tmp_path), blocks=["dynamic"], token_limit=100,
-                              resolvers=["dynamic"])
+                              resolvers=["dynamic"], join_format="plain")
 
     def my_resolver(task, remaining_tokens, context, builder):
         return f"resolved: {task}"
@@ -72,7 +73,7 @@ def test_resolver_registry_is_used_when_provided(tmp_path):
 def test_filter_registry_is_used_when_provided(tmp_path):
     _write_block(tmp_path, "shout", "v1", "{{ text | shout }}")
     config = PromptingConfig(blocks_dir=str(tmp_path), blocks=["shout"], token_limit=100,
-                              filters=["shout"])
+                              filters=["shout"], join_format="plain")
 
     builder = PromptBuilder(config, _FakeTokenizer(), filter_registry={"shout": str.upper})
     result = builder.build(task=None, context={"text": "hi"})
@@ -162,7 +163,7 @@ def test_build_resolver_undefinederror_is_annotated_with_the_resolver(tmp_path):
 def test_block_overrides_from_config_is_used_by_default(tmp_path):
     _write_block(tmp_path, "greeting", "v1", "Hello, {{ name }}!")
     config = PromptingConfig(blocks_dir=str(tmp_path), blocks=["greeting"], token_limit=100,
-                              block_overrides={"greeting": "Hi there."})
+                              block_overrides={"greeting": "Hi there."}, join_format="plain")
     builder = PromptBuilder(config, _FakeTokenizer())
 
     result = builder.build(task=None, context={})
@@ -173,7 +174,7 @@ def test_block_overrides_from_config_is_used_by_default(tmp_path):
 def test_explicit_overrides_param_wins_over_config_block_overrides(tmp_path):
     _write_block(tmp_path, "greeting", "v1", "Hello, {{ name }}!")
     config = PromptingConfig(blocks_dir=str(tmp_path), blocks=["greeting"], token_limit=100,
-                              block_overrides={"greeting": "from config"})
+                              block_overrides={"greeting": "from config"}, join_format="plain")
     builder = PromptBuilder(config, _FakeTokenizer())
 
     result = builder.build(task=None, context={}, overrides={"greeting": "from call"})
@@ -197,3 +198,70 @@ def test_chat_template_kwargs_reach_apply_chat_template(tmp_path):
     builder.build(task=None, context={})
 
     assert tokenizer.last_kwargs == {"enable_thinking": False}
+
+
+def test_xml_join_format_wraps_every_block_even_without_an_explicit_tag(tmp_path):
+    """Regression test: _join used to only wrap a block when its BlockSpec
+    had an explicit .tag set - but blocks are configured as plain name
+    strings almost everywhere (block_overrides, block names as raw str in
+    `blocks`), which BlockSpec.parse leaves with tag=None. join_format
+    therefore had no visible effect for the common case: config asked for
+    XML and got plain concatenated text back."""
+    _write_block(tmp_path, "greeting", "v1", "Hello!")
+    _write_block(tmp_path, "farewell", "v1", "Bye!")
+    config = PromptingConfig(blocks_dir=str(tmp_path), blocks=["greeting", "farewell"],
+                              token_limit=100, join_format="xml")
+    builder = PromptBuilder(config, _FakeTokenizer())
+
+    result = builder.build(task=None, context={})
+
+    assert result == "<GREETING>\nHello!\n</GREETING>\n<FAREWELL>\nBye!\n</FAREWELL>"
+
+
+def test_md_join_format_wraps_every_block_even_without_an_explicit_tag(tmp_path):
+    _write_block(tmp_path, "greeting", "v1", "Hello!")
+    config = PromptingConfig(blocks_dir=str(tmp_path), blocks=["greeting"],
+                              token_limit=100, join_format="md")
+    builder = PromptBuilder(config, _FakeTokenizer())
+
+    result = builder.build(task=None, context={})
+
+    assert result == "## GREETING\n\nHello!\n\n---"
+
+
+def test_plain_join_format_leaves_blocks_unwrapped(tmp_path):
+    _write_block(tmp_path, "greeting", "v1", "Hello!")
+    _write_block(tmp_path, "farewell", "v1", "Bye!")
+    config = PromptingConfig(blocks_dir=str(tmp_path), blocks=["greeting", "farewell"],
+                              token_limit=100, join_format="plain")
+    builder = PromptBuilder(config, _FakeTokenizer())
+
+    result = builder.build(task=None, context={})
+
+    assert result == "Hello!\nBye!"
+
+
+def test_explicit_block_tag_overrides_the_uppercased_name(tmp_path):
+    _write_block(tmp_path, "greeting", "v1", "Hello!")
+    config = PromptingConfig(blocks_dir=str(tmp_path), blocks=[BlockSpec(name="greeting", tag="HELLO")],
+                              token_limit=100, join_format="xml")
+    builder = PromptBuilder(config, _FakeTokenizer())
+
+    result = builder.build(task=None, context={})
+
+    assert result == "<HELLO>\nHello!\n</HELLO>"
+
+
+def test_xml_join_format_wraps_blocks_under_a_chat_template_too(tmp_path):
+    """Same _join code path exists twice - once for the plain-string
+    return, once for building chat messages before apply_chat_template -
+    the tag-wrapping bug affected both identically."""
+    _write_block(tmp_path, "greeting", "v1", "Hello!")
+    config = PromptingConfig(blocks_dir=str(tmp_path), blocks=["greeting"], token_limit=100,
+                              join_format="xml", chat_template="whatever")
+    tokenizer = _FakeChatTokenizer()
+    builder = PromptBuilder(config, tokenizer)
+
+    result = builder.build(task=None, context={})
+
+    assert result == "<GREETING>\nHello!\n</GREETING>"
