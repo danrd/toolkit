@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
@@ -51,7 +51,7 @@ class WandbLogConfig(BaseModel):
 
 
 def run_llm_over_tasks(
-    tasks: List[Tuple[Any, Any]],
+    tasks: List[Any],
     llm_module: Any,
     evaluator: EvaluatorFn,
     context_builder: Optional[ContextBuilderFn] = None,
@@ -59,14 +59,14 @@ def run_llm_over_tasks(
     log_config: Optional[WandbLogConfig] = None,
     run_id: Optional[str] = None,
     run_name: Optional[str] = None,
-    prompt_description: str = "",
+    run_description: str = "",
     extra_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run `llm_module` over `tasks`, logging + checkpointing to
     wandb as it goes.
 
     Args:
-        tasks: (task_id, task) pairs. task_id must be JSON-serializable
+        tasks: task objects, each exposing a JSON-serializable `.id`
             (str/int) - it's the checkpoint's resume key.
         llm_module: anything with `.builder.build(task, context)`
             and `.runner.generate(prompt)` - a llm_kit.prompt_builder.PromptBuilder
@@ -88,7 +88,7 @@ def run_llm_over_tasks(
 
     log_config = log_config or WandbLogConfig()
     context_builder = context_builder or (lambda task: {})
-    config_dict = {"prompt_description": prompt_description, **(extra_config or {})}
+    config_dict = {"run_description": run_description, **(extra_config or {})}
 
     run = wandb.init(project=log_config.project, name=run_name, group=log_config.group,
                       config=config_dict, resume="allow", id=run_id)
@@ -109,7 +109,8 @@ def run_llm_over_tasks(
         print(f"Resuming wandb run {run_id}: {len(processed_ids)} tasks already processed")
 
     tasks_since_checkpoint = 0
-    for task_id, task in tasks:
+    for task in tasks:
+        task_id = task.id
         if task_id in processed_ids:
             continue
 
@@ -130,7 +131,7 @@ def run_llm_over_tasks(
 
         all_results.append({
             "task_id": task_id, "prompt_text": prompt, "generation_result": generation,
-            "prompt_length": len(prompt), "prompt_description": prompt_description,
+            "prompt_length": len(prompt), "run_description": run_description,
             "metrics": eval_result.metrics, "primary_score": eval_result.primary_score,
             "processing_time_min": processing_time_min,
         })

@@ -30,10 +30,11 @@ together or separately, plus one small optional aggregator:
   are imported lazily, so importing this module never requires every
   backend's library installed.
 - **`llm_run.py` + `logging.py`** — `run_llm_over_tasks(...)`: a generic,
-  resumable loop over `(task_id, task)` pairs - build a prompt, generate,
-  score with a pluggable `evaluator(task, generated_text) -> EvalResult`,
-  log + checkpoint to wandb as it goes. Safe to interrupt and re-run with
-  the same `run_id` - already-processed tasks are skipped.
+  resumable loop over tasks (each exposing a JSON-serializable `.id`) -
+  build a prompt, generate, score with a pluggable
+  `evaluator(task, generated_text) -> EvalResult`, log + checkpoint to
+  wandb as it goes. Safe to interrupt and re-run with the same `run_id`
+  - already-processed tasks are skipped.
 - **`runner_config.py`** — `RunnerConfig`: bundles `base`/`generation`/
   `prompt` into the one object `build_runner(config)` already expects
   (`config.base`, `config.generation`, `config.to_llama_cpp()`/`.to_vllm()`/

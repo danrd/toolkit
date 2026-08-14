@@ -12,7 +12,7 @@ def prepare_prompt_artifact(prompts_artifact, task_idx:int, prompt_data, report_
         with prompts_artifact.new_file(f"task_{task_idx}_prompt_readable.txt") as f:
             f.write(f"{'='*80}\n")
             f.write(f"Task: {prompt_data['task_id']}\n")
-            f.write(f"Description: {prompt_data['prompt_description']}\n")
+            f.write(f"Description: {prompt_data['run_description']}\n")
             f.write(f"Length: {prompt_data['prompt_length']} characters\n")
             f.write(f"{'='*80}\n")
             f.write(f"Generation result:\n\n{prompt_data['generation_result']}\n\n")

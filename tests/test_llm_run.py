@@ -89,8 +89,10 @@ class FakeWandb:
         self.run: Optional[_FakeRun] = None
         self.logged: List[Dict[str, Any]] = []
         self.finished = False
+        self.init_kwargs: Dict[str, Any] = {}
 
     def init(self, **kwargs):
+        self.init_kwargs = kwargs
         self.run = _FakeRun(kwargs.get("id"), self._artifact_root)
         return self.run
 
@@ -121,7 +123,7 @@ class _FakeBuilder:
         self._prompts = prompts
 
     def build(self, task, context=None):
-        return self._prompts[task]
+        return self._prompts[task.id]
 
 
 class _FakeRunner:
@@ -141,6 +143,16 @@ def _fake_module(prompts, generations):
     return module
 
 
+class _FakeTask:
+    """A minimal stand-in for run_llm_over_tasks' generic task contract -
+    only the `.id` it actually requires."""
+    def __init__(self, id):
+        self.id = id
+
+    def __repr__(self):
+        return f"_FakeTask({self.id!r})"
+
+
 def _exact_match_evaluator(task, generated_text: str) -> EvalResult:
     solved = generated_text == "CORRECT"
     return EvalResult(metrics={"exact_match": float(solved)}, primary_score=float(solved), solved=solved)
@@ -154,7 +166,7 @@ def test_run_llm_over_tasks_basic(fake_wandb):
     module = _fake_module(prompts, generations)
 
     summary = run_llm_over_tasks(
-        tasks=[("t1", "t1"), ("t2", "t2")],
+        tasks=[_FakeTask("t1"), _FakeTask("t2")],
         llm_module=module,
         evaluator=_exact_match_evaluator,
         log_config=WandbLogConfig(project="test-proj"),
@@ -170,6 +182,22 @@ def test_run_llm_over_tasks_basic(fake_wandb):
     assert "task_t2_exact_match" in logged_keys
 
 
+def test_run_llm_over_tasks_sends_run_description_to_wandb_config_and_results(fake_wandb):
+    prompts = {"t1": "prompt-1"}
+    generations = {"prompt-1": "CORRECT"}
+    module = _fake_module(prompts, generations)
+
+    summary = run_llm_over_tasks(
+        tasks=[_FakeTask("t1")], llm_module=module, evaluator=_exact_match_evaluator,
+        log_config=WandbLogConfig(project="test-proj"),
+        run_description="baseline sweep",
+        extra_config={"model": "fake-model"},
+    )
+
+    assert fake_wandb.init_kwargs["config"] == {"run_description": "baseline sweep", "model": "fake-model"}
+    assert summary["results"][0]["run_description"] == "baseline sweep"
+
+
 def test_run_llm_over_tasks_skips_prompt_that_doesnt_fit(fake_wandb):
     prompts = {"t1": None}  # PromptBuilder.build() returns None when it doesn't fit token_limit
     module = _fake_module(prompts, generations={})
@@ -181,7 +209,7 @@ def test_run_llm_over_tasks_skips_prompt_that_doesnt_fit(fake_wandb):
         return EvalResult()
 
     summary = run_llm_over_tasks(
-        tasks=[("t1", "t1")], llm_module=module, evaluator=evaluator,
+        tasks=[_FakeTask("t1")], llm_module=module, evaluator=evaluator,
         log_config=WandbLogConfig(project="test-proj"),
     )
 
@@ -199,7 +227,7 @@ def test_run_llm_over_tasks_resume_skips_already_processed_tasks(fake_wandb):
     module = _fake_module(prompts, generations)
 
     run_llm_over_tasks(
-        tasks=[("t1", "t1")], llm_module=module, evaluator=_exact_match_evaluator,
+        tasks=[_FakeTask("t1")], llm_module=module, evaluator=_exact_match_evaluator,
         log_config=WandbLogConfig(project="test-proj", checkpoint_interval=1),
         run_id="resume-me",
     )
@@ -211,12 +239,12 @@ def test_run_llm_over_tasks_resume_skips_already_processed_tasks(fake_wandb):
         return _exact_match_evaluator(task, text)
 
     summary = run_llm_over_tasks(
-        tasks=[("t1", "t1"), ("t2", "t2")], llm_module=module, evaluator=counting_evaluator,
+        tasks=[_FakeTask("t1"), _FakeTask("t2")], llm_module=module, evaluator=counting_evaluator,
         log_config=WandbLogConfig(project="test-proj", checkpoint_interval=1),
         run_id="resume-me",
     )
 
-    assert calls == ["t2"]  # t1 was skipped - already in the checkpoint
+    assert [t.id for t in calls] == ["t2"]  # t1 was skipped - already in the checkpoint
     assert {r["task_id"] for r in summary["results"]} == {"t1", "t2"}
     assert summary["solved_tasks"] == ["t1"]
 
@@ -228,7 +256,7 @@ def test_run_llm_over_tasks_resume_with_no_prior_checkpoint_does_not_crash(fake_
     module = _fake_module({"t1": "prompt-1"}, {"prompt-1": "CORRECT"})
 
     summary = run_llm_over_tasks(
-        tasks=[("t1", "t1")], llm_module=module, evaluator=_exact_match_evaluator,
+        tasks=[_FakeTask("t1")], llm_module=module, evaluator=_exact_match_evaluator,
         log_config=WandbLogConfig(project="test-proj"),
         run_id="never-run-before",
     )
