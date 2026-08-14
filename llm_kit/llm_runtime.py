@@ -402,6 +402,22 @@ class OpenRouterRunner(BaseRunner):
         raise AllModelsFailedError(f"All {len(self.models)} OpenRouter models failed: {last_error}")
 
 
+def build_openrouter_runner(config) -> OpenRouterRunner:
+    """Construct an OpenRouterRunner from config.llm's OpenRouter fields
+    and config.to_chat_completions() - the hosted counterpart to
+    llm_setup.build_runner(), but never chained into its local-backend
+    fallback: opted into explicitly, same as OpenRouterRunner itself
+    (e.g. via SubsymbolicModule(experiment_config, tokenizer, runner=
+    build_openrouter_runner(experiment_config)) to run it alongside a
+    local module built from the same config)."""
+    return OpenRouterRunner(
+        models=config.llm.openrouter_models,
+        generation_kwargs=config.to_chat_completions(),
+        max_retries=config.llm.openrouter_max_retries,
+        timeout=config.llm.openrouter_request_timeout,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Process cleanup — used by ServerRunner.close() above, and reused by
 # llm_kit.llm_setup's fallback chain when a server fails its health

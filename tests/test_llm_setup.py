@@ -27,6 +27,19 @@ def test_tokenizer_model_defaults_to_none():
     assert config.tokenizer_model is None
 
 
+def test_openrouter_settings_have_sane_defaults():
+    """These live on LlmConfig rather than a separate OpenRouterConfig -
+    OpenRouterRunner is a deliberately separate, opt-in path (see
+    llm_runtime.build_openrouter_runner), not something build_runner ever
+    constructs on its own, but its settings still belong with the rest of
+    "which model(s) this experiment can use" rather than a config type of
+    their own."""
+    config = LlmConfig()
+    assert config.openrouter_models
+    assert config.openrouter_max_retries == 2
+    assert config.openrouter_request_timeout == 30.0
+
+
 def test_tokenizer_model_can_be_set_separately_from_model():
     config = LlmConfig(model="unsloth/Qwen3.6-27B-GGUF", tokenizer_model="Qwen/Qwen3.6-27B")
 

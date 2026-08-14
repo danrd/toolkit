@@ -81,6 +81,8 @@ class LlmConfig(BaseModel):
     max_context: int = 9000  # llm token limit for computational resources to control
     openrouter_models: List[str] = ["google/gemma-4-26b-a4b-it",
                                     "nvidia/nemotron-3-ultra-550b-a55b"]
+    openrouter_max_retries: int = 2
+    openrouter_request_timeout: float = 30.0
     n_ctx: Optional[int] = None  # falls back to max_context, then generation.max_tokens, when unset
     n_tokens_batch: int = 512
     use_mlock: bool = True

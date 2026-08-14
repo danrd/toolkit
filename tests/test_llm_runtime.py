@@ -5,7 +5,7 @@ import sys
 from types import SimpleNamespace
 from typing import Any, Dict
 
-from llm_kit.llm_runtime import GenerationConfig, ServerRunner
+from llm_kit.llm_runtime import GenerationConfig, OpenRouterRunner, ServerRunner, build_openrouter_runner
 
 
 def test_to_chat_completions_omits_extra_body_by_default():
@@ -67,3 +67,25 @@ def test_server_runner_client_defaults_request_timeout_to_600s(monkeypatch):
     _ = runner.client
 
     assert _FakeOpenAI.last_kwargs["timeout"] == 600.0
+
+
+def test_build_openrouter_runner_reads_models_and_settings_from_llm_config(monkeypatch):
+    """The hosted counterpart to llm_setup.build_runner() - constructs an
+    OpenRouterRunner from config.llm's OpenRouter fields rather than a
+    separate config object, so a hosted and a local module can share one
+    ExperimentConfig without mutating it (see SubsymbolicModule's
+    runner= injection in llm_kit's consuming projects)."""
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=_FakeOpenAI))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+    llm = SimpleNamespace(openrouter_models=["model/a", "model/b"],
+                           openrouter_max_retries=5, openrouter_request_timeout=12.0)
+    config = SimpleNamespace(llm=llm, to_chat_completions=lambda: {"temperature": 0.0})
+
+    runner = build_openrouter_runner(config)
+
+    assert isinstance(runner, OpenRouterRunner)
+    assert runner.models == ["model/a", "model/b"]
+    assert runner.generation_kwargs == {"temperature": 0.0}
+    assert _FakeOpenAI.last_kwargs["max_retries"] == 5
+    assert _FakeOpenAI.last_kwargs["timeout"] == 12.0
