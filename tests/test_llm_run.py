@@ -220,6 +220,40 @@ def test_assistant_prefix_builder_defaults_to_none(fake_wandb):
     assert module.builder.last_assistant_prefix is None
 
 
+def test_prompt_artifact_name_leads_with_zero_padded_index_when_present(fake_wandb):
+    """Regression scenario: wandb's Artifacts list sorts names as plain
+    strings, not numbers - an unpadded index put "task_1919_..." before
+    "task_443_...", making the list unscannable. task.index is optional
+    and generic as far as this loop is concerned (same as everywhere else
+    it's read), so a task without one still gets a working, if unpadded,
+    fallback name."""
+    prompts = {"t1": "prompt-1"}
+    generations = {"prompt-1": "CORRECT"}
+    module = _fake_module(prompts, generations)
+
+    run_llm_over_tasks(
+        tasks=[_FakeTask("t1", index=37)], llm_module=module, evaluator=_exact_match_evaluator,
+        log_config=WandbLogConfig(project="test-proj", log_prompt_artifacts=True),
+    )
+
+    artifact_names = [a.name for a in fake_wandb.run.logged_artifacts]
+    assert "task_0037_t1_prompt" in artifact_names
+
+
+def test_prompt_artifact_name_falls_back_to_bare_id_without_index(fake_wandb):
+    prompts = {"t1": "prompt-1"}
+    generations = {"prompt-1": "CORRECT"}
+    module = _fake_module(prompts, generations)
+
+    run_llm_over_tasks(
+        tasks=[_FakeTask("t1")], llm_module=module, evaluator=_exact_match_evaluator,
+        log_config=WandbLogConfig(project="test-proj", log_prompt_artifacts=True),
+    )
+
+    artifact_names = [a.name for a in fake_wandb.run.logged_artifacts]
+    assert "task_t1_prompt" in artifact_names
+
+
 def test_run_llm_over_tasks_sends_run_description_to_wandb_config_and_results(fake_wandb):
     prompts = {"t1": "prompt-1"}
     generations = {"prompt-1": "CORRECT"}

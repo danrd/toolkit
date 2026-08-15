@@ -37,6 +37,18 @@ AssistantPrefixBuilderFn = Callable[[Any], Optional[str]]
 ResultPlotterFn = Callable[[Any, str, EvalResult], Any]
 
 
+def _artifact_task_label(task) -> str:
+    """A wandb-artifact-name-safe per-task label. Zero-pads the index
+    (when the task carries one) so wandb's Artifacts list - which sorts
+    names as plain strings, not numbers - doesn't put "task_1919_..."
+    before "task_443_..."; falls back to the bare id when there's no
+    index to lead with."""
+    task_index = getattr(task, "index", None)
+    if isinstance(task_index, int):
+        return f"{task_index:04d}_{task.id}"
+    return str(task.id)
+
+
 class WandbLogConfig(BaseModel):
     """How much detail a run logs/checkpoints to wandb. The per-task result
     plot is by far the most expensive part (renders a figure per task) -
@@ -185,7 +197,7 @@ def run_llm_over_tasks(
             wandb.log(log_payload)
 
         if log_config.log_prompt_artifacts:
-            artifact = wandb.Artifact(f"task_{task_id}_prompt", type="dataset")
+            artifact = wandb.Artifact(f"task_{_artifact_task_label(task)}_prompt", type="dataset")
             artifact = prepare_prompt_artifact(artifact, task_id, all_results[-1])
             run.log_artifact(artifact)
 
