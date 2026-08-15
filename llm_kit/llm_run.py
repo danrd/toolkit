@@ -174,7 +174,10 @@ def run_llm_over_tasks(
     processed_ids = set()
     all_results: List[Dict[str, Any]] = []
     solved_tasks: List[Any] = []
-    tasks_summary = wandb.Table(columns=["task_id", "primary_score", "prompt_len"])
+    # log_mode="MUTABLE": this table is logged repeatedly (once per checkpoint)
+    # after further add_data() calls in between - wandb's default IMMUTABLE mode
+    # would silently drop everything past the first log() for the same table.
+    tasks_summary = wandb.Table(columns=["task_id", "primary_score", "prompt_len"], log_mode="MUTABLE")
 
     if run_id:
         checkpoint = load_checkpoint_from_wandb(run) or {}
@@ -183,7 +186,7 @@ def run_llm_over_tasks(
         solved_tasks = checkpoint.get("solved_tasks", [])
         summary_data = checkpoint.get("tasks_summary")
         if summary_data:
-            tasks_summary = wandb.Table(dataframe=pd.DataFrame(summary_data))
+            tasks_summary = wandb.Table(dataframe=pd.DataFrame(summary_data), log_mode="MUTABLE")
         print(f"Resuming wandb run {run_id}: {len(processed_ids)} tasks already processed")
 
     tasks_since_checkpoint = 0

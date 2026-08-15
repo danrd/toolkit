@@ -67,7 +67,8 @@ class _FakeRun:
 
 
 class _FakeTable:
-    def __init__(self, columns=None, dataframe=None):
+    def __init__(self, columns=None, dataframe=None, log_mode=None):
+        self.log_mode = log_mode
         if dataframe is not None:
             self._columns = list(dataframe.columns)
             self.rows = dataframe.values.tolist()
@@ -98,8 +99,8 @@ class FakeWandb:
         self.run = _FakeRun(kwargs.get("id"), self._artifact_root)
         return self.run
 
-    def Table(self, columns=None, dataframe=None):
-        return _FakeTable(columns=columns, dataframe=dataframe)
+    def Table(self, columns=None, dataframe=None, log_mode=None):
+        return _FakeTable(columns=columns, dataframe=dataframe, log_mode=log_mode)
 
     def Artifact(self, name, type, metadata=None):
         return _FakeArtifact(name, type, os.path.join(self._artifact_root, name), metadata=metadata)
@@ -329,6 +330,24 @@ def test_tasks_summary_is_logged_as_a_panel_on_checkpoint_cadence(fake_wandb):
     summary_logs = [p["tasks_summary"] for p in fake_wandb.logged if "tasks_summary" in p]
     assert len(summary_logs) == 2  # once per checkpoint (interval=1 -> every task)
     assert summary_logs[-1].get_dataframe()["task_id"].tolist() == ["t1", "t2"]
+
+
+def test_tasks_summary_table_is_mutable_so_repeated_logging_actually_takes(fake_wandb):
+    """Regression test: wandb.Table defaults to log_mode="IMMUTABLE" - once
+    logged, further add_data() calls stop taking effect on subsequent log()
+    calls for the same table, which is exactly what tasks_summary does
+    (mutated + re-logged once per checkpoint)."""
+    prompts = {"t1": "prompt-1"}
+    generations = {"prompt-1": "CORRECT"}
+    module = _fake_module(prompts, generations)
+
+    run_llm_over_tasks(
+        tasks=[_FakeTask("t1")], llm_module=module, evaluator=_exact_match_evaluator,
+        log_config=WandbLogConfig(project="test-proj", checkpoint_interval=1),
+    )
+
+    summary_logs = [p["tasks_summary"] for p in fake_wandb.logged if "tasks_summary" in p]
+    assert all(table.log_mode == "MUTABLE" for table in summary_logs)
 
 
 def test_summary_solved_tasks_carries_the_actual_list(fake_wandb):
