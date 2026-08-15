@@ -33,6 +33,7 @@ class EvalResult:
 
 EvaluatorFn = Callable[[Any, str], EvalResult]
 ContextBuilderFn = Callable[[Any], Dict[str, Any]]
+AssistantPrefixBuilderFn = Callable[[Any], Optional[str]]
 ResultPlotterFn = Callable[[Any, str, EvalResult], Any]
 
 
@@ -55,6 +56,7 @@ def run_llm_over_tasks(
     llm_module: Any,
     evaluator: EvaluatorFn,
     context_builder: Optional[ContextBuilderFn] = None,
+    assistant_prefix_builder: Optional[AssistantPrefixBuilderFn] = None,
     result_plotter: Optional[ResultPlotterFn] = None,
     log_config: Optional[WandbLogConfig] = None,
     run_id: Optional[str] = None,
@@ -77,6 +79,15 @@ def run_llm_over_tasks(
             scoring logic belongs.
         context_builder(task) -> dict: builds the PromptBuilder context for
             one task (e.g. a per-task role instruction). Defaults to {}.
+        assistant_prefix_builder(task) -> str | None: builds a per-task
+            PromptBuilder.build(assistant_prefix=...) override - e.g. a
+            known partial-answer header, so the model only has to continue
+            the answer instead of producing its own header from scratch.
+            Defaults to None (no override). Whatever prefix is used here
+            has to be threaded into `evaluator`/`result_plotter` separately
+            (they only ever see the model's own completion, not the prefix
+            it continues from) - wrap them in closures sharing the same
+            per-task prefix logic.
         result_plotter(task, generated_text, eval_result) -> a
             wandb-loggable object (e.g. a matplotlib figure): built once
             per task whenever either log_config.log_result_plot or
@@ -99,6 +110,7 @@ def run_llm_over_tasks(
 
     log_config = log_config or WandbLogConfig()
     context_builder = context_builder or (lambda task: {})
+    assistant_prefix_builder = assistant_prefix_builder or (lambda task: None)
     config_dict = {"run_description": run_description, **(extra_config or {})}
 
     run = wandb.init(project=log_config.project, name=run_name, group=log_config.group,
@@ -127,7 +139,8 @@ def run_llm_over_tasks(
 
         start = time.time()
         context = context_builder(task)
-        prompt = llm_module.builder.build(task, context=context)
+        assistant_prefix = assistant_prefix_builder(task)
+        prompt = llm_module.builder.build(task, context=context, assistant_prefix=assistant_prefix)
         if prompt is None:
             print(f"task {task_id}: skipped, prompt didn't fit token_limit")
             processed_ids.add(task_id)

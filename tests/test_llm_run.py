@@ -122,8 +122,10 @@ def fake_wandb(tmp_path, monkeypatch):
 class _FakeBuilder:
     def __init__(self, prompts: Dict[str, Optional[str]]):
         self._prompts = prompts
+        self.last_assistant_prefix = None
 
-    def build(self, task, context=None):
+    def build(self, task, context=None, assistant_prefix=None):
+        self.last_assistant_prefix = assistant_prefix
         return self._prompts[task.id]
 
 
@@ -184,6 +186,38 @@ def test_run_llm_over_tasks_basic(fake_wandb):
     logged_keys = {k for payload in fake_wandb.logged for k in payload}
     assert "task_t1_exact_match" in logged_keys
     assert "task_t2_exact_match" in logged_keys
+
+
+def test_assistant_prefix_builder_reaches_the_prompt_builder(fake_wandb):
+    """assistant_prefix_builder(task) -> str is threaded into
+    builder.build(assistant_prefix=...) per task, same shape as
+    context_builder - the caller is expected to feed the identical value
+    into its evaluator/result_plotter separately (they only ever see the
+    model's own completion, not what it was continuing from)."""
+    prompts = {"t1": "prompt-1"}
+    generations = {"prompt-1": "CORRECT"}
+    module = _fake_module(prompts, generations)
+
+    run_llm_over_tasks(
+        tasks=[_FakeTask("t1")], llm_module=module, evaluator=_exact_match_evaluator,
+        log_config=WandbLogConfig(project="test-proj"),
+        assistant_prefix_builder=lambda task: f"{task.id}-prefix",
+    )
+
+    assert module.builder.last_assistant_prefix == "t1-prefix"
+
+
+def test_assistant_prefix_builder_defaults_to_none(fake_wandb):
+    prompts = {"t1": "prompt-1"}
+    generations = {"prompt-1": "CORRECT"}
+    module = _fake_module(prompts, generations)
+
+    run_llm_over_tasks(
+        tasks=[_FakeTask("t1")], llm_module=module, evaluator=_exact_match_evaluator,
+        log_config=WandbLogConfig(project="test-proj"),
+    )
+
+    assert module.builder.last_assistant_prefix is None
 
 
 def test_run_llm_over_tasks_sends_run_description_to_wandb_config_and_results(fake_wandb):
