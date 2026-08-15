@@ -265,3 +265,44 @@ def test_xml_join_format_wraps_blocks_under_a_chat_template_too(tmp_path):
     result = builder.build(task=None, context={})
 
     assert result == "<GREETING>\nHello!\n</GREETING>"
+
+
+def test_assistant_prefix_appends_to_a_plain_joined_prompt(tmp_path):
+    """Regression test: assistant_prefix used to be silently dropped
+    whenever chat_template wasn't set - a plain completion model can
+    still be primed the same way: ending the prompt with the desired
+    continuation's start."""
+    _write_block(tmp_path, "greeting", "v1", "Hello!")
+    config = PromptingConfig(blocks_dir=str(tmp_path), blocks=["greeting"], token_limit=100,
+                              join_format="plain", assistant_prefix="1,1:\n")
+    builder = PromptBuilder(config, _FakeTokenizer())
+
+    result = builder.build(task=None, context={})
+
+    assert result == "Hello!\n1,1:\n"
+
+
+def test_build_assistant_prefix_param_overrides_config(tmp_path):
+    _write_block(tmp_path, "greeting", "v1", "Hello!")
+    config = PromptingConfig(blocks_dir=str(tmp_path), blocks=["greeting"], token_limit=100,
+                              join_format="plain", assistant_prefix="from-config")
+    builder = PromptBuilder(config, _FakeTokenizer())
+
+    result = builder.build(task=None, context={}, assistant_prefix="from-call")
+
+    assert result == "Hello!\nfrom-call"
+
+
+def test_assistant_prefix_reaches_the_assistant_turn_under_chat_template(tmp_path):
+    _write_block(tmp_path, "greeting", "v1", "Hello!")
+    config = PromptingConfig(blocks_dir=str(tmp_path), blocks=["greeting"], token_limit=100,
+                              join_format="plain", chat_template="whatever", assistant_prefix="1,1:\n")
+    tokenizer = _FakeChatTokenizer()
+    builder = PromptBuilder(config, tokenizer)
+
+    result = builder.build(task=None, context={})
+
+    # _FakeChatTokenizer.apply_chat_template joins each message's content
+    # with "|" - the assistant turn carrying assistant_prefix has to be
+    # the last message.
+    assert result == "Hello!|1,1:\n"

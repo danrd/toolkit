@@ -162,7 +162,8 @@ class PromptBuilder:
             ) from e
 
     def build(self, task, context: Optional[dict] = None,
-              overrides: Optional[Dict[str, str]] = None) -> Optional[str]:
+              overrides: Optional[Dict[str, str]] = None,
+              assistant_prefix: Optional[str] = None) -> Optional[str]:
         """Render and join all configured blocks.
 
         `context` feeds Jinja variables to every block template.
@@ -172,11 +173,18 @@ class PromptBuilder:
         winning. Set block_overrides once on the config for a quick
         notebook-style wording tweak that doesn't need a new template
         version file; pass overrides= to override just this one call.
+        `assistant_prefix` is a per-call override for config.assistant_prefix
+        - e.g. a known partial-answer header so the model only has to
+        continue instead of producing its own header from scratch. None
+        (the default) falls back to config.assistant_prefix; pass "" to
+        suppress a configured prefix for one call. Works whether or not
+        config.chat_template is set - see _join.
         Returns None if the prompt can't fit within token_limit (even after
         trimming the examples block down to `min_examples`).
         """
         context = context or {}
         overrides = {**self.config.block_overrides, **(overrides or {})}
+        effective_prefix = assistant_prefix if assistant_prefix is not None else self.config.assistant_prefix
         parts: "OrderedDict[str, Tuple[BlockSpec, str]]" = OrderedDict()
         used_tokens = 0
 
@@ -207,18 +215,24 @@ class PromptBuilder:
             parts[spec.name] = (spec, rendered)
             used_tokens += cost
 
-        return self._join(parts)
+        return self._join(parts, effective_prefix)
 
     def count_tokens(self, text: str) -> int:
         return len(self.tokenizer.tokenize(text))
 
-    def _join(self, parts: "OrderedDict[str, Tuple[BlockSpec, str]]") -> str:
+    def _join(self, parts: "OrderedDict[str, Tuple[BlockSpec, str]]", assistant_prefix: Optional[str] = None) -> str:
         if self.config.chat_template is None:
             sections = [
                 self._wrap(spec.tag or spec.name.upper(), content)
                 for spec, content in parts.values()
             ]
-            return "\n".join(sections)
+            joined = "\n".join(sections)
+            # No chat structure to attach an assistant turn to here - a
+            # plain completion model can still be primed by literally
+            # ending the prompt with the desired continuation's start.
+            if assistant_prefix:
+                joined = f"{joined}\n{assistant_prefix}"
+            return joined
 
         role_buckets: Dict[str, list] = {"system": [], "user": []}
         for spec, content in parts.values():
@@ -230,8 +244,8 @@ class PromptBuilder:
             messages.append({"role": "system", "content": "\n".join(role_buckets["system"])})
         messages.append({"role": "user", "content": "\n".join(role_buckets["user"])})
 
-        if self.config.assistant_prefix:
-            messages.append({"role": "assistant", "content": self.config.assistant_prefix})
+        if assistant_prefix:
+            messages.append({"role": "assistant", "content": assistant_prefix})
             return self.tokenizer.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=False, **self.config.chat_template_kwargs,
             )
