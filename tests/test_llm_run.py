@@ -35,9 +35,10 @@ class _FakeFile:
 
 
 class _FakeArtifact:
-    def __init__(self, name, type, storage_dir):
+    def __init__(self, name, type, storage_dir, metadata=None):
         self.name = name
         self.type = type
+        self.metadata = metadata or {}
         self._dir = storage_dir
         os.makedirs(self._dir, exist_ok=True)
 
@@ -100,8 +101,8 @@ class FakeWandb:
     def Table(self, columns=None, dataframe=None):
         return _FakeTable(columns=columns, dataframe=dataframe)
 
-    def Artifact(self, name, type):
-        return _FakeArtifact(name, type, os.path.join(self._artifact_root, name))
+    def Artifact(self, name, type, metadata=None):
+        return _FakeArtifact(name, type, os.path.join(self._artifact_root, name), metadata=metadata)
 
     def log(self, payload):
         self.logged.append(payload)
@@ -237,7 +238,7 @@ def test_prompt_artifact_name_leads_with_zero_padded_index_when_present(fake_wan
     )
 
     artifact_names = [a.name for a in fake_wandb.run.logged_artifacts]
-    assert "task_0037_t1_prompt" in artifact_names
+    assert any(name.endswith("task_0037_t1_prompt") for name in artifact_names)
 
 
 def test_prompt_artifact_name_falls_back_to_bare_id_without_index(fake_wandb):
@@ -251,7 +252,97 @@ def test_prompt_artifact_name_falls_back_to_bare_id_without_index(fake_wandb):
     )
 
     artifact_names = [a.name for a in fake_wandb.run.logged_artifacts]
-    assert "task_t1_prompt" in artifact_names
+    assert any(name.endswith("task_t1_prompt") for name in artifact_names)
+
+
+def test_prompt_artifact_name_is_prefixed_by_run_name_to_avoid_cross_run_collisions(fake_wandb):
+    """Regression test: wandb versions an artifact by name *within the
+    whole project* - two unrelated runs (different models/configs) that
+    happen to process the same task used to silently share one artifact
+    identity (stacking up as versions of "the same" prompt) since the
+    name was task-only. run_name (sanitized: "/" isn't a legal artifact
+    name character - it's a path separator in wandb's own syntax) now
+    disambiguates."""
+    prompts = {"t1": "prompt-1"}
+    generations = {"prompt-1": "CORRECT"}
+    module = _fake_module(prompts, generations)
+
+    run_llm_over_tasks(
+        tasks=[_FakeTask("t1")], llm_module=module, evaluator=_exact_match_evaluator,
+        log_config=WandbLogConfig(project="test-proj", log_prompt_artifacts=True),
+        run_name="unsloth/Qwen3-30B",
+    )
+
+    artifact_names = [a.name for a in fake_wandb.run.logged_artifacts]
+    assert "unsloth-Qwen3-30B_task_t1_prompt" in artifact_names
+
+
+def test_prompt_artifact_name_falls_back_to_run_id_without_a_run_name(fake_wandb):
+    prompts = {"t1": "prompt-1"}
+    generations = {"prompt-1": "CORRECT"}
+    module = _fake_module(prompts, generations)
+
+    run_llm_over_tasks(
+        tasks=[_FakeTask("t1")], llm_module=module, evaluator=_exact_match_evaluator,
+        log_config=WandbLogConfig(project="test-proj", log_prompt_artifacts=True),
+        run_id="my-run-id",
+    )
+
+    artifact_names = [a.name for a in fake_wandb.run.logged_artifacts]
+    assert "my-run-id_task_t1_prompt" in artifact_names
+
+
+def test_prompt_artifact_carries_self_describing_metadata(fake_wandb):
+    """Each artifact should be identifiable without tracing back to its
+    run - clicking into it from the project-wide Artifacts list is the
+    common case, not browsing from the run that produced it."""
+    prompts = {"t1": "prompt-1"}
+    generations = {"prompt-1": "CORRECT"}
+    module = _fake_module(prompts, generations)
+
+    run_llm_over_tasks(
+        tasks=[_FakeTask("t1", index=37)], llm_module=module, evaluator=_exact_match_evaluator,
+        log_config=WandbLogConfig(project="test-proj", log_prompt_artifacts=True),
+        run_name="unsloth-Qwen3-30B", run_id="my-run-id",
+    )
+
+    artifact = fake_wandb.run.logged_artifacts[0]
+    assert artifact.metadata == {
+        "run_id": "my-run-id", "run_name": "unsloth-Qwen3-30B", "task_id": "t1",
+        "task_index": 37, "primary_score": 1.0, "solved": True,
+    }
+
+
+def test_tasks_summary_is_logged_as_a_panel_on_checkpoint_cadence(fake_wandb):
+    """tasks_summary is the intended way to browse "which tasks, what
+    score" for a run - a live Table panel, not a trip through the
+    project's whole (unrelated-runs-mixed-in) Artifacts list."""
+    prompts = {"t1": "prompt-1", "t2": "prompt-2"}
+    generations = {"prompt-1": "CORRECT", "prompt-2": "WRONG"}
+    module = _fake_module(prompts, generations)
+
+    run_llm_over_tasks(
+        tasks=[_FakeTask("t1"), _FakeTask("t2")], llm_module=module, evaluator=_exact_match_evaluator,
+        log_config=WandbLogConfig(project="test-proj", checkpoint_interval=1),
+    )
+
+    summary_logs = [p["tasks_summary"] for p in fake_wandb.logged if "tasks_summary" in p]
+    assert len(summary_logs) == 2  # once per checkpoint (interval=1 -> every task)
+    assert summary_logs[-1].get_dataframe()["task_id"].tolist() == ["t1", "t2"]
+
+
+def test_summary_solved_tasks_carries_the_actual_list(fake_wandb):
+    prompts = {"t1": "prompt-1", "t2": "prompt-2"}
+    generations = {"prompt-1": "CORRECT", "prompt-2": "WRONG"}
+    module = _fake_module(prompts, generations)
+
+    run_llm_over_tasks(
+        tasks=[_FakeTask("t1"), _FakeTask("t2")], llm_module=module, evaluator=_exact_match_evaluator,
+        log_config=WandbLogConfig(project="test-proj"),
+    )
+
+    solved_lists = [p["summary/solved_tasks"] for p in fake_wandb.logged if "summary/solved_tasks" in p]
+    assert solved_lists[-1] == ["t1"]
 
 
 def test_run_llm_over_tasks_sends_run_description_to_wandb_config_and_results(fake_wandb):

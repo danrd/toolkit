@@ -6,6 +6,7 @@ and log + checkpoint the run to wandb along the way.
 """
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
@@ -37,6 +38,17 @@ AssistantPrefixBuilderFn = Callable[[Any], Optional[str]]
 ResultPlotterFn = Callable[[Any, str, EvalResult], Any]
 
 
+_ARTIFACT_NAME_UNSAFE_RE = re.compile(r"[^a-zA-Z0-9_\-.]")
+
+
+def _sanitize_artifact_name_part(text: str) -> str:
+    """wandb artifact names reject most punctuation outright (and a "/"
+    is parsed as an entity/project/artifact path separator, not a literal
+    character) - run_name is caller-supplied free text (e.g. a model repo
+    id like "unsloth/Qwen3-30B-...")."""
+    return _ARTIFACT_NAME_UNSAFE_RE.sub("-", text)
+
+
 def _artifact_task_label(task) -> str:
     """A wandb-artifact-name-safe per-task label. Zero-pads the index
     (when the task carries one) so wandb's Artifacts list - which sorts
@@ -47,6 +59,18 @@ def _artifact_task_label(task) -> str:
     if isinstance(task_index, int):
         return f"{task_index:04d}_{task.id}"
     return str(task.id)
+
+
+def _artifact_run_label(run, run_name: Optional[str]) -> str:
+    """Disambiguates one run's artifacts from another's. wandb versions
+    an artifact by NAME within a project - without this, two unrelated
+    runs (different models, different configs) that happen to process
+    the same task would silently share ONE artifact identity, stacking
+    up as versions v1, v2... of "the same" prompt when they're actually
+    unrelated. run.id is always unique and always available; run_name
+    (when the caller set one) makes the artifact list human-readable too."""
+    label = run_name or run.id
+    return _sanitize_artifact_name_part(label)
 
 
 class WandbLogConfig(BaseModel):
@@ -115,6 +139,25 @@ def run_llm_over_tasks(
             when a task happens to carry one - purely an optional,
             generic attribute as far as this loop is concerned, not tied
             to any particular dataset's own numbering.
+
+    Wandb specifics:
+        - Per-task prompt artifacts (log_config.log_prompt_artifacts) are
+          named f"{run_name or run.id}_task_{...}_prompt" - the run label
+          disambiguates one run's artifacts from another's, since wandb
+          versions an artifact by name *within the whole project*: without
+          it, two unrelated runs that happen to process the same task
+          would silently share one artifact identity instead of each
+          getting their own. Each artifact also carries `metadata`
+          (run_id, run_name, task_id, task_index, primary_score, solved)
+          so it's self-describing without tracing back to its run.
+        - tasks_summary (task_id/primary_score/prompt_len so far) is
+          logged as a live, sortable Table panel on the same cadence as
+          checkpointing - the intended way to browse "which tasks, what
+          score" for one run, rather than scrolling the project's whole
+          Artifacts list.
+        - "summary/solved_tasks" carries the actual list of solved task
+          ids (not just "summary/total_solved"'s count) as a run summary
+          value.
 
     Returns {"results": [...], "solved_tasks": [...], "avg_score": float}.
     """
@@ -192,12 +235,18 @@ def run_llm_over_tasks(
             log_payload["summary/total_tasks"] = len(all_results)
             log_payload["summary/avg_primary_score"] = tasks_summary.get_dataframe()["primary_score"].mean()
             log_payload["summary/total_solved"] = len(solved_tasks)
+            log_payload["summary/solved_tasks"] = solved_tasks
             if log_config.log_result_plot and fig is not None:
                 log_payload[f"task_{task_id}_result_plot"] = fig
             wandb.log(log_payload)
 
         if log_config.log_prompt_artifacts:
-            artifact = wandb.Artifact(f"task_{_artifact_task_label(task)}_prompt", type="dataset")
+            artifact_name = f"{_artifact_run_label(run, run_name)}_task_{_artifact_task_label(task)}_prompt"
+            artifact = wandb.Artifact(artifact_name, type="dataset", metadata={
+                "run_id": run.id, "run_name": run_name, "task_id": task_id,
+                "task_index": getattr(task, "index", None),
+                "primary_score": eval_result.primary_score, "solved": eval_result.solved,
+            })
             artifact = prepare_prompt_artifact(artifact, task_id, all_results[-1])
             run.log_artifact(artifact)
 
@@ -205,6 +254,7 @@ def run_llm_over_tasks(
         tasks_since_checkpoint += 1
         if tasks_since_checkpoint >= log_config.checkpoint_interval:
             save_checkpoint_to_wandb(run, tasks_summary, all_results, processed_ids, solved_tasks)
+            wandb.log({"tasks_summary": tasks_summary})
             tasks_since_checkpoint = 0
 
     wandb.finish()
