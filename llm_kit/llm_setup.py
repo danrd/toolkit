@@ -387,7 +387,8 @@ def _build_cpu_runner(config) -> BaseRunner:
         process = _start_llama_cpp_server(config)
         if _wait_for_server_ready(process, port, timeout=server_ready_timeout):
             _report_runner_started("llama.cpp server", config, process=process)
-            return ServerRunner(process, port, config.llm.model, config.to_chat_completions(),
+            return ServerRunner(process, port, config.llm.model,
+                                 config.to_chat_completions(grammar_backend="llama_cpp"),
                                  request_timeout=getattr(config.base, "request_timeout", 600.0))
         _terminate_process(process)
         errors.append(
@@ -417,7 +418,8 @@ def _build_gpu_runner(config) -> BaseRunner:
         process = _start_vllm_server(config)
         if _wait_for_server_ready(process, port, timeout=server_ready_timeout):
             _report_runner_started("vLLM server", config, process=process)
-            return ServerRunner(process, port, config.llm.model, config.to_chat_completions(),
+            return ServerRunner(process, port, config.llm.model,
+                                 config.to_chat_completions(grammar_backend="vllm"),
                                  request_timeout=getattr(config.base, "request_timeout", 600.0))
         _terminate_process(process)
         errors.append(

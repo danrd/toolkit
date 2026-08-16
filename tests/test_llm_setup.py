@@ -296,7 +296,7 @@ def test_build_cpu_runner_passes_request_timeout_to_server_runner(tmp_path, monk
     config = SimpleNamespace(base=BaseConfig(request_timeout=120.0),
                               llm=SimpleNamespace(model="fake/model", quant_file=""),
                               generation=SimpleNamespace(chat_template_kwargs={}),
-                              to_chat_completions=lambda: {})
+                              to_chat_completions=lambda grammar_backend="llama_cpp": {})
     fake_process = SimpleNamespace(log_file=SimpleNamespace(name="llama_cpp.log"))
 
     with patch("llm_kit.llm_setup._start_llama_cpp_server", return_value=fake_process), \
@@ -305,6 +305,40 @@ def test_build_cpu_runner_passes_request_timeout_to_server_runner(tmp_path, monk
         _build_cpu_runner(config)
 
     assert mock_server_runner.call_args.kwargs["request_timeout"] == 120.0
+
+
+def test_build_cpu_runner_passes_llama_cpp_grammar_backend(tmp_path, monkeypatch):
+    """llm_setup knows which server flavor it just started - to_chat_completions
+    has to be told which one explicitly, not left to guess."""
+    monkeypatch.chdir(tmp_path)
+    grammar_backends = []
+    config = SimpleNamespace(base=BaseConfig(), llm=SimpleNamespace(model="fake/model", quant_file=""),
+                              generation=SimpleNamespace(chat_template_kwargs={}),
+                              to_chat_completions=lambda grammar_backend="llama_cpp": grammar_backends.append(grammar_backend) or {})
+    fake_process = SimpleNamespace(log_file=SimpleNamespace(name="llama_cpp.log"))
+
+    with patch("llm_kit.llm_setup._start_llama_cpp_server", return_value=fake_process), \
+         patch("llm_kit.llm_setup._wait_for_server_ready", return_value=True), \
+         patch("llm_kit.llm_setup.ServerRunner"):
+        _build_cpu_runner(config)
+
+    assert grammar_backends == ["llama_cpp"]
+
+
+def test_build_gpu_runner_passes_vllm_grammar_backend(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    grammar_backends = []
+    config = SimpleNamespace(base=SimpleNamespace(device="gpu"), llm=SimpleNamespace(model="fake/model"),
+                              generation=SimpleNamespace(),
+                              to_chat_completions=lambda grammar_backend="llama_cpp": grammar_backends.append(grammar_backend) or {})
+    fake_process = SimpleNamespace(log_file=SimpleNamespace(name="vllm_server.log"))
+
+    with patch("llm_kit.llm_setup._start_vllm_server", return_value=fake_process), \
+         patch("llm_kit.llm_setup._wait_for_server_ready", return_value=True), \
+         patch("llm_kit.llm_setup.ServerRunner"):
+        _build_gpu_runner(config)
+
+    assert grammar_backends == ["vllm"]
 
 
 def test_build_gpu_runner_health_check_failure_reports_timeout_and_log_file(tmp_path, monkeypatch):

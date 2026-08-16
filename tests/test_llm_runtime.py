@@ -5,6 +5,8 @@ import sys
 from types import SimpleNamespace
 from typing import Any, Dict
 
+import pytest
+
 from llm_kit.llm_runtime import GenerationConfig, OpenRouterRunner, ServerRunner, build_openrouter_runner
 
 
@@ -40,12 +42,42 @@ def test_to_chat_completions_sends_repetition_penalty_and_top_k_via_extra_body()
 def test_to_chat_completions_forwards_grammar_as_extra_body():
     """Raw GBNF text, unlike to_llama_cpp - only llama-cpp-python's server
     accepts this as a vendor extension field; there's no client-side
-    compiling to do."""
+    compiling to do. Defaults to the llama_cpp key name."""
     config = GenerationConfig(grammar='root ::= "a"')
 
     params = config.to_chat_completions(seed=42)
 
     assert params["extra_body"]["grammar"] == 'root ::= "a"'
+
+
+def test_to_chat_completions_uses_guided_grammar_key_for_vllm_backend():
+    """llama.cpp-server and vllm-serve accept a raw grammar under different
+    extra_body key names - the caller (llm_setup, which just started one or
+    the other) says which, rather than this method guessing or sending
+    both keys speculatively."""
+    config = GenerationConfig(grammar='root ::= "a"')
+
+    params = config.to_chat_completions(seed=42, grammar_backend="vllm")
+
+    assert params["extra_body"]["guided_grammar"] == 'root ::= "a"'
+    assert "grammar" not in params["extra_body"]
+
+
+def test_to_chat_completions_rejects_an_unknown_grammar_backend():
+    config = GenerationConfig(grammar='root ::= "a"')
+
+    with pytest.raises(ValueError):
+        config.to_chat_completions(seed=42, grammar_backend="bogus")
+
+
+def test_to_chat_completions_ignores_grammar_backend_when_no_grammar_is_set():
+    """An unrecognized grammar_backend only matters once there's an actual
+    grammar to route - no grammar set means nothing to raise about."""
+    config = GenerationConfig()
+
+    params = config.to_chat_completions(seed=42, grammar_backend="bogus")
+
+    assert "extra_body" not in params
 
 
 def test_to_llama_cpp_omits_grammar_by_default():

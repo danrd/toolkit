@@ -62,5 +62,5 @@ class RunnerConfig(BaseModel):
     def to_hf(self) -> dict:
         return self.generation.to_hf(seed=self.base.seed)
 
-    def to_chat_completions(self) -> dict:
-        return self.generation.to_chat_completions(seed=self.base.seed)
+    def to_chat_completions(self, grammar_backend: str = "llama_cpp") -> dict:
+        return self.generation.to_chat_completions(seed=self.base.seed, grammar_backend=grammar_backend)

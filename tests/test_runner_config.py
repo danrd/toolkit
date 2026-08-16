@@ -51,3 +51,14 @@ def test_to_chat_completions_delegates_to_generation_seeded_from_base():
 
     assert params["seed"] == 7
     assert params["temperature"] == 0.5
+
+
+def test_to_chat_completions_forwards_grammar_backend_to_generation():
+    """llm_setup passes grammar_backend explicitly (it just started either
+    a llama.cpp or a vllm server, so it knows which) - this thin wrapper
+    has to actually forward it, not just seed."""
+    config = RunnerConfig(generation=GenerationConfig(grammar='root ::= "a"'))
+
+    params = config.to_chat_completions(grammar_backend="vllm")
+
+    assert params["extra_body"]["guided_grammar"] == 'root ::= "a"'

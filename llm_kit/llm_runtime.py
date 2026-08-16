@@ -34,6 +34,11 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
+# Which extra_body key a grammar travels under, per OpenAI-compatible server
+# flavor - see GenerationConfig.to_chat_completions' grammar_backend param.
+_GRAMMAR_EXTRA_BODY_KEYS = {"llama_cpp": "grammar", "vllm": "guided_grammar"}
+
+
 class GenerationConfig(BaseModel):
     """Base framework-agnostic config specifying key llm generation parameters."""
     model_config = ConfigDict(validate_assignment=True, extra="forbid", frozen=False)
@@ -175,11 +180,21 @@ class GenerationConfig(BaseModel):
 
         return params
 
-    def to_chat_completions(self, seed: int) -> dict:
+    def to_chat_completions(self, seed: int, grammar_backend: str = "llama_cpp") -> dict:
         """Prepare generation config for any OpenAI-compatible Chat
         Completions endpoint - OpenRouter (OpenRouterRunner) as well as a
         local llama.cpp-server/vllm-serve instance (ServerRunner talks to
-        the exact same request shape)."""
+        the exact same request shape).
+
+        grammar_backend: which server is actually receiving this request -
+        llama.cpp-server and vllm-serve both accept a raw GBNF grammar as a
+        vendor extension field in the request body, but under different
+        names ("grammar" vs "guided_grammar"). This method has no way to
+        know which one it's talking to on its own; the caller does (it just
+        started the process) - see llm_setup._build_cpu_runner/_build_gpu_runner,
+        which pass "llama_cpp"/"vllm" through explicitly rather than this
+        method guessing or sending both keys speculatively. Ignored unless
+        self.grammar is set."""
         if self.use_beam_search:
             raise ValueError(
                 "Chat Completions API does not support beam search via `use_beam_search`."
@@ -214,7 +229,10 @@ class GenerationConfig(BaseModel):
         if self.chat_template_kwargs:
             extra_body["chat_template_kwargs"] = self.chat_template_kwargs
         if self.grammar:
-            extra_body["grammar"] = self.grammar
+            if grammar_backend not in _GRAMMAR_EXTRA_BODY_KEYS:
+                raise ValueError(f"Unsupported grammar_backend: {grammar_backend!r} "
+                                  f"(expected one of {sorted(_GRAMMAR_EXTRA_BODY_KEYS)})")
+            extra_body[_GRAMMAR_EXTRA_BODY_KEYS[grammar_backend]] = self.grammar
         if extra_body:
             params["extra_body"] = extra_body
 
