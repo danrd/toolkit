@@ -512,6 +512,92 @@ def test_show_progress_off_by_default_prints_nothing_about_score(fake_wandb, cap
     assert "score=" not in out
 
 
+@pytest.fixture
+def blocked_wandb(monkeypatch):
+    """Simulates wandb not being installed at all - `import wandb` raises
+    ImportError inside run_llm_over_tasks (sys.modules[name] = None is
+    Python's own way of forcing that). Used to prove debug=True truly never
+    touches wandb, not just that a fake stands in for it."""
+    monkeypatch.setitem(sys.modules, "wandb", None)
+
+
+def test_debug_mode_never_imports_wandb(blocked_wandb):
+    prompts = {"t1": "prompt-1", "t2": "prompt-2"}
+    generations = {"prompt-1": "CORRECT", "prompt-2": "WRONG"}
+    module = _fake_module(prompts, generations)
+
+    summary = run_llm_over_tasks(
+        tasks=[_FakeTask("t1"), _FakeTask("t2")], llm_module=module, evaluator=_exact_match_evaluator,
+        debug=True,
+    )
+
+    assert summary["solved_tasks"] == ["t1"]
+    assert summary["avg_score"] == 0.5
+    assert len(summary["results"]) == 2
+
+
+def test_debug_mode_prints_full_prompt_and_generation(blocked_wandb, capsys):
+    prompts = {"t1": "prompt-1"}
+    generations = {"prompt-1": "CORRECT"}
+    module = _fake_module(prompts, generations)
+
+    run_llm_over_tasks(
+        tasks=[_FakeTask("t1", index=5)], llm_module=module, evaluator=_exact_match_evaluator,
+        debug=True,
+    )
+
+    out = capsys.readouterr().out
+    assert "task 5 (t1)" in out
+    assert "prompt-1" in out
+    assert "CORRECT" in out
+    assert "score=1.000 solved=True" in out
+
+
+def test_debug_mode_shows_plot_when_result_plotter_is_set(blocked_wandb, monkeypatch):
+    """matplotlib isn't a llm_kit dependency, so a fake stand-in is
+    installed into sys.modules rather than requiring a real install (same
+    approach as fake_wandb / test_show_progress_prints_score_and_shows_plot_once)."""
+    prompts = {"t1": "prompt-1"}
+    generations = {"prompt-1": "CORRECT"}
+    module = _fake_module(prompts, generations)
+
+    calls = []
+
+    def plotter(task, text, eval_result):
+        calls.append(task)
+        return "FIGURE"
+
+    shown = []
+    fake_pyplot = types.SimpleNamespace(show=lambda: shown.append(True))
+    fake_matplotlib = types.SimpleNamespace(pyplot=fake_pyplot)
+    monkeypatch.setitem(sys.modules, "matplotlib", fake_matplotlib)
+    monkeypatch.setitem(sys.modules, "matplotlib.pyplot", fake_pyplot)
+
+    run_llm_over_tasks(
+        tasks=[_FakeTask("t1")], llm_module=module, evaluator=_exact_match_evaluator,
+        result_plotter=plotter, debug=True,
+    )
+
+    assert len(calls) == 1
+    assert shown == [True]
+
+
+def test_debug_mode_ignores_run_id_resume(blocked_wandb):
+    """run_id normally triggers load_checkpoint_from_wandb - if debug mode
+    didn't skip that branch too, this would blow up on the blocked wandb
+    import (there's nothing to resume from without a real wandb run)."""
+    prompts = {"t1": "prompt-1"}
+    generations = {"prompt-1": "CORRECT"}
+    module = _fake_module(prompts, generations)
+
+    summary = run_llm_over_tasks(
+        tasks=[_FakeTask("t1")], llm_module=module, evaluator=_exact_match_evaluator,
+        debug=True, run_id="some-run-id",
+    )
+
+    assert summary["results"][0]["task_id"] == "t1"
+
+
 def test_run_llm_over_tasks_resume_with_no_prior_checkpoint_does_not_crash(fake_wandb):
     """Regression test: load_checkpoint_from_wandb returns None when no
     checkpoint artifact exists yet - the original script's `checkpoint.get(...)`

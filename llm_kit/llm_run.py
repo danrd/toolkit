@@ -87,6 +87,25 @@ class WandbLogConfig(BaseModel):
     checkpoint_interval: int = Field(default=1, ge=1)
 
 
+def _print_debug_task_info(task, prompt: str, generation: str, eval_result: EvalResult,
+                            processing_time_min: float) -> None:
+    """debug=True's per-task dump - the full prompt and full raw generation,
+    not just the score, since the point is to see exactly what went in and
+    what came back while iterating on a prompt/parsing problem, without
+    waiting on the wandb dashboard."""
+    task_index = getattr(task, "index", None)
+    task_label = f"task {task_index} ({task.id})" if task_index is not None else f"task {task.id}"
+    separator = "=" * 80
+    print(separator)
+    print(f"{task_label}: score={eval_result.primary_score:.3f} solved={eval_result.solved} "
+          f"metrics={eval_result.metrics} time={processing_time_min:.2f}min")
+    print(f"--- prompt ({len(prompt)} chars) ---")
+    print(prompt)
+    print(f"--- generation ({len(generation)} chars) ---")
+    print(generation)
+    print(separator)
+
+
 def run_llm_over_tasks(
     tasks: List[Any],
     llm_module: Any,
@@ -100,6 +119,7 @@ def run_llm_over_tasks(
     run_description: str = "",
     extra_config: Optional[Dict[str, Any]] = None,
     show_progress: bool = False,
+    debug: bool = False,
 ) -> Dict[str, Any]:
     """Run `llm_module` over `tasks`, logging + checkpointing to
     wandb as it goes.
@@ -139,8 +159,17 @@ def run_llm_over_tasks(
             when a task happens to carry one - purely an optional,
             generic attribute as far as this loop is concerned, not tied
             to any particular dataset's own numbering.
+        debug: skip wandb entirely - no wandb.init/log/artifacts/
+            checkpointing, and wandb doesn't even need to be installed -
+            and print each task's full prompt and full raw generation
+            (not just the score) instead of show_progress's one-line
+            summary, plus still show its plot when result_plotter is set.
+            For iterating on a prompt/parsing problem locally without
+            touching the dashboard. run_id resume is ignored (there is no
+            wandb checkpoint to resume from); log_config's wandb-specific
+            fields are unused.
 
-    Wandb specifics:
+    Wandb specifics (skipped entirely when debug=True):
         - Per-task prompt artifacts (log_config.log_prompt_artifacts) are
           named f"{run_name or run.id}_task_{...}_prompt" - the run label
           disambiguates one run's artifacts from another's, since wandb
@@ -161,33 +190,36 @@ def run_llm_over_tasks(
 
     Returns {"results": [...], "solved_tasks": [...], "avg_score": float}.
     """
-    import wandb  # lazy: constructing WandbLogConfig/EvalResult shouldn't require wandb installed
-
     log_config = log_config or WandbLogConfig()
     context_builder = context_builder or (lambda task: {})
     assistant_prefix_builder = assistant_prefix_builder or (lambda task: None)
-    config_dict = {"run_description": run_description, **(extra_config or {})}
-
-    run = wandb.init(project=log_config.project, name=run_name, group=log_config.group,
-                      config=config_dict, resume="allow", id=run_id)
 
     processed_ids = set()
     all_results: List[Dict[str, Any]] = []
     solved_tasks: List[Any] = []
-    # log_mode="MUTABLE": this table is logged repeatedly (once per checkpoint)
-    # after further add_data() calls in between - wandb's default IMMUTABLE mode
-    # would silently drop everything past the first log() for the same table.
-    tasks_summary = wandb.Table(columns=["task_id", "primary_score", "prompt_len"], log_mode="MUTABLE")
+    wandb = None
+    run = None
+    tasks_summary = None
 
-    if run_id:
-        checkpoint = load_checkpoint_from_wandb(run) or {}
-        processed_ids = set(checkpoint.get("processed_tasks", []))
-        all_results = checkpoint.get("prompts_data", [])
-        solved_tasks = checkpoint.get("solved_tasks", [])
-        summary_data = checkpoint.get("tasks_summary")
-        if summary_data:
-            tasks_summary = wandb.Table(dataframe=pd.DataFrame(summary_data), log_mode="MUTABLE")
-        print(f"Resuming wandb run {run_id}: {len(processed_ids)} tasks already processed")
+    if not debug:
+        import wandb  # lazy: debug runs (and just constructing WandbLogConfig/EvalResult) shouldn't require wandb installed
+        config_dict = {"run_description": run_description, **(extra_config or {})}
+        run = wandb.init(project=log_config.project, name=run_name, group=log_config.group,
+                          config=config_dict, resume="allow", id=run_id)
+        # log_mode="MUTABLE": this table is logged repeatedly (once per checkpoint)
+        # after further add_data() calls in between - wandb's default IMMUTABLE mode
+        # would silently drop everything past the first log() for the same table.
+        tasks_summary = wandb.Table(columns=["task_id", "primary_score", "prompt_len"], log_mode="MUTABLE")
+
+        if run_id:
+            checkpoint = load_checkpoint_from_wandb(run) or {}
+            processed_ids = set(checkpoint.get("processed_tasks", []))
+            all_results = checkpoint.get("prompts_data", [])
+            solved_tasks = checkpoint.get("solved_tasks", [])
+            summary_data = checkpoint.get("tasks_summary")
+            if summary_data:
+                tasks_summary = wandb.Table(dataframe=pd.DataFrame(summary_data), log_mode="MUTABLE")
+            print(f"Resuming wandb run {run_id}: {len(processed_ids)} tasks already processed")
 
     tasks_since_checkpoint = 0
     for task in tasks:
@@ -217,21 +249,25 @@ def run_llm_over_tasks(
             "metrics": eval_result.metrics, "primary_score": eval_result.primary_score,
             "processing_time_min": processing_time_min,
         })
-        tasks_summary.add_data(str(task_id), eval_result.primary_score, len(prompt))
+        if not debug:
+            tasks_summary.add_data(str(task_id), eval_result.primary_score, len(prompt))
 
         fig = None
-        if result_plotter is not None and (show_progress or log_config.log_result_plot):
+        if result_plotter is not None and (show_progress or debug or log_config.log_result_plot):
             fig = result_plotter(task, generation, eval_result)
 
-        if show_progress:
+        if debug:
+            _print_debug_task_info(task, prompt, generation, eval_result, processing_time_min)
+        elif show_progress:
             task_index = getattr(task, "index", None)
             task_label = f"task {task_index} ({task_id})" if task_index is not None else f"task {task_id}"
             print(f"{task_label}: score={eval_result.primary_score:.3f} solved={eval_result.solved}")
-            if fig is not None:
-                import matplotlib.pyplot as plt  # lazy: show_progress is opt-in, plotting shouldn't be a hard dependency otherwise
-                plt.show()
 
-        if log_config.log_per_task_metrics:
+        if (debug or show_progress) and fig is not None:
+            import matplotlib.pyplot as plt  # lazy: opt-in, plotting shouldn't be a hard dependency otherwise
+            plt.show()
+
+        if not debug and log_config.log_per_task_metrics:
             log_payload = {f"task_{task_id}_{name}": value for name, value in eval_result.metrics.items()}
             log_payload[f"task_{task_id}_processing_time_min"] = processing_time_min
             log_payload[f"task_{task_id}_prompt_len"] = len(prompt)
@@ -243,7 +279,7 @@ def run_llm_over_tasks(
                 log_payload[f"task_{task_id}_result_plot"] = fig
             wandb.log(log_payload)
 
-        if log_config.log_prompt_artifacts:
+        if not debug and log_config.log_prompt_artifacts:
             artifact_name = f"{_artifact_run_label(run, run_name)}_task_{_artifact_task_label(task)}_prompt"
             artifact = wandb.Artifact(artifact_name, type="dataset", metadata={
                 "run_id": run.id, "run_name": run_name, "task_id": task_id,
@@ -254,12 +290,14 @@ def run_llm_over_tasks(
             run.log_artifact(artifact)
 
         processed_ids.add(task_id)
-        tasks_since_checkpoint += 1
-        if tasks_since_checkpoint >= log_config.checkpoint_interval:
-            save_checkpoint_to_wandb(run, tasks_summary, all_results, processed_ids, solved_tasks)
-            wandb.log({"tasks_summary": tasks_summary})
-            tasks_since_checkpoint = 0
+        if not debug:
+            tasks_since_checkpoint += 1
+            if tasks_since_checkpoint >= log_config.checkpoint_interval:
+                save_checkpoint_to_wandb(run, tasks_summary, all_results, processed_ids, solved_tasks)
+                wandb.log({"tasks_summary": tasks_summary})
+                tasks_since_checkpoint = 0
 
-    wandb.finish()
-    avg_score = float(tasks_summary.get_dataframe()["primary_score"].mean()) if all_results else 0.0
+    if not debug:
+        wandb.finish()
+    avg_score = float(sum(r["primary_score"] for r in all_results) / len(all_results)) if all_results else 0.0
     return {"results": all_results, "solved_tasks": solved_tasks, "avg_score": avg_score}
