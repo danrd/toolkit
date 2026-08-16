@@ -37,6 +37,33 @@ def test_to_chat_completions_sends_repetition_penalty_and_top_k_via_extra_body()
     assert params["extra_body"] == {"repetition_penalty": 1.2, "top_k": 40}
 
 
+def test_to_chat_completions_forwards_grammar_as_extra_body():
+    """Raw GBNF text, unlike to_llama_cpp - only llama-cpp-python's server
+    accepts this as a vendor extension field; there's no client-side
+    compiling to do."""
+    config = GenerationConfig(grammar='root ::= "a"')
+
+    params = config.to_chat_completions(seed=42)
+
+    assert params["extra_body"]["grammar"] == 'root ::= "a"'
+
+
+def test_to_llama_cpp_omits_grammar_by_default():
+    params = GenerationConfig().to_llama_cpp(seed=42)
+
+    assert "grammar" not in params
+
+
+def test_to_llama_cpp_compiles_grammar_to_a_llama_grammar_instance():
+    from llama_cpp import LlamaGrammar
+
+    config = GenerationConfig(grammar='root ::= "a"')
+
+    params = config.to_llama_cpp(seed=42)
+
+    assert isinstance(params["grammar"], LlamaGrammar)
+
+
 class _FakeOpenAI:
     """Captures the kwargs openai.OpenAI(...) was constructed with, without
     requiring the openai package to actually be installed in this test env."""

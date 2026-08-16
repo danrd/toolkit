@@ -80,6 +80,20 @@ class GenerationConfig(BaseModel):
                                                "hand if you don't know ahead of time which tier will end up "
                                                "active.")
 
+    grammar: Optional[str] = Field(default=None,
+                                   description="Raw GBNF grammar text constraining every generated token to "
+                                               "the grammar's language - structurally impossible for the "
+                                               "model to write reasoning/preamble text outside of it, unlike "
+                                               "a prompt instruction the model can just ignore. Honored by "
+                                               "to_llama_cpp() (compiled to a llama_cpp.LlamaGrammar there) "
+                                               "and by to_chat_completions() (forwarded as a raw string via "
+                                               "extra_body['grammar']) - but the latter only takes effect "
+                                               "against a llama-cpp-python server (its OpenAI-compatible "
+                                               "endpoint accepts this as a vendor extension field); vLLM has "
+                                               "its own different guided-decoding API, and hosted providers "
+                                               "(OpenRouter) don't support raw GBNF at all. Ignored by "
+                                               "to_vllm()/to_hf() for now.")
+
     def to_dict(self, exclude_none: bool = True, exclude_unset: bool = False) -> Dict[str, Any]:
         """Plain dict for **kwargs unpacking."""
         return self.model_dump(exclude_none=exclude_none, exclude_unset=exclude_unset)
@@ -90,7 +104,7 @@ class GenerationConfig(BaseModel):
 
     def to_llama_cpp(self, seed: int) -> dict:
         """Prepare generation config for llama_cpp framework using a set of defaults parameters."""
-        return {
+        params = {
             "temperature":        self.temperature,
             "max_tokens":         self.max_tokens,
             "top_p":              self.top_p,
@@ -99,6 +113,10 @@ class GenerationConfig(BaseModel):
             "stop":               self.stop,
             "repeat_penalty":     self.repetition_penalty,
         }
+        if self.grammar:
+            from llama_cpp import LlamaGrammar  # lazy: only grammar-constrained callers need llama_cpp installed here
+            params["grammar"] = LlamaGrammar.from_string(self.grammar)
+        return params
 
     def to_vllm(self, seed: int):
         """Prepare generation config for vllm framework using a set of defaults parameters."""
@@ -195,6 +213,8 @@ class GenerationConfig(BaseModel):
             extra_body["repetition_penalty"] = self.repetition_penalty
         if self.chat_template_kwargs:
             extra_body["chat_template_kwargs"] = self.chat_template_kwargs
+        if self.grammar:
+            extra_body["grammar"] = self.grammar
         if extra_body:
             params["extra_body"] = extra_body
 
