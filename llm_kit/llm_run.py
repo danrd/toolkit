@@ -89,18 +89,18 @@ class WandbLogConfig(BaseModel):
 
 def _print_debug_task_info(task, prompt: str, generation: str, eval_result: EvalResult,
                             processing_time_min: float) -> None:
-    """debug=True's per-task dump - the full prompt and full raw generation,
-    not just the score, since the point is to see exactly what went in and
-    what came back while iterating on a prompt/parsing problem, without
-    waiting on the wandb dashboard."""
+    """debug=True's per-task dump - the full raw generation, not just the
+    score, since the point is to see exactly what came back while iterating
+    on a prompt/parsing problem, without waiting on the wandb dashboard.
+    The prompt itself is left out (only its length is shown) - with
+    few-shot examples baked in it's often huge, and it's rarely what's
+    being debugged once prompt-building itself is already trusted."""
     task_index = getattr(task, "index", None)
     task_label = f"task {task_index} ({task.id})" if task_index is not None else f"task {task.id}"
     separator = "=" * 80
     print(separator)
     print(f"{task_label}: score={eval_result.primary_score:.3f} solved={eval_result.solved} "
-          f"metrics={eval_result.metrics} time={processing_time_min:.2f}min")
-    print(f"--- prompt ({len(prompt)} chars) ---")
-    print(prompt)
+          f"metrics={eval_result.metrics} time={processing_time_min:.2f}min prompt_len={len(prompt)}")
     print(f"--- generation ({len(generation)} chars) ---")
     print(generation)
     print(separator)

@@ -536,9 +536,12 @@ def test_debug_mode_never_imports_wandb(blocked_wandb):
     assert len(summary["results"]) == 2
 
 
-def test_debug_mode_prints_full_prompt_and_generation(blocked_wandb, capsys):
-    prompts = {"t1": "prompt-1"}
-    generations = {"prompt-1": "CORRECT"}
+def test_debug_mode_prints_generation_but_not_the_full_prompt(blocked_wandb, capsys):
+    """The prompt is often huge (few-shot examples baked in) and rarely
+    what's being debugged once prompt-building is already trusted - only
+    its length should show up, not its full text."""
+    prompts = {"t1": "a-very-long-prompt-text"}
+    generations = {"a-very-long-prompt-text": "CORRECT"}
     module = _fake_module(prompts, generations)
 
     run_llm_over_tasks(
@@ -548,7 +551,8 @@ def test_debug_mode_prints_full_prompt_and_generation(blocked_wandb, capsys):
 
     out = capsys.readouterr().out
     assert "task 5 (t1)" in out
-    assert "prompt-1" in out
+    assert "prompt_len=23" in out
+    assert "a-very-long-prompt-text" not in out
     assert "CORRECT" in out
     assert "score=1.000 solved=True" in out
 
