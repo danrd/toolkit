@@ -64,6 +64,28 @@ class PromptingConfig(BaseModel):
     project: Dict[str, Any] = {}  # other project specific prompting settings
 
 
+class ApproxTokenizer:
+    """Whitespace-split stand-in for a real tokenizer.
+
+    PromptBuilder only needs `.tokenize(text)` to return something with a
+    `len()` (see count_tokens), so budgeting a prompt doesn't have to mean
+    downloading a model's tokenizer to count approximately anyway. It
+    lives here rather than in each project because that contract is
+    defined here, and every caller that only budgets - a CLI, a demo UI,
+    a test - was otherwise rewriting this same class.
+
+    Undercounts against real subword tokenization (one whitespace-
+    separated word is often several tokens), so a budget checked with this
+    is optimistic: use the real tokenizer wherever token_limit has to
+    hold exactly. `apply_chat_template` is deliberately not provided -
+    configs that set PromptingConfig.chat_template need a real tokenizer
+    regardless, and a stub would only fail further downstream.
+    """
+
+    def tokenize(self, text: str) -> List[str]:
+        return text.split()
+
+
 class PromptBuilder:
     """Composes a prompt string (or chat message list) from configured blocks."""
 

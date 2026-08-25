@@ -306,3 +306,32 @@ def test_assistant_prefix_reaches_the_assistant_turn_under_chat_template(tmp_pat
     # with "|" - the assistant turn carrying assistant_prefix has to be
     # the last message.
     assert result == "Hello!|1,1:\n"
+
+
+# -- ApproxTokenizer ---------------------------------------------------------
+
+def test_approx_tokenizer_satisfies_the_count_tokens_contract(tmp_path):
+    """The whole reason it exists: PromptBuilder.count_tokens calls
+    .tokenize(text) and takes len() of the result."""
+    from llm_kit.prompt_builder import ApproxTokenizer
+
+    builder = PromptBuilder(PromptingConfig(blocks_dir=str(tmp_path)), ApproxTokenizer())
+
+    assert builder.count_tokens("one two three") == 3
+    assert builder.count_tokens("") == 0
+
+
+def test_approx_tokenizer_budgets_a_real_prompt(tmp_path):
+    """End to end through build(): a token_limit that can't fit the block
+    must still be enforced when this is the tokenizer doing the counting."""
+    from llm_kit.prompt_builder import ApproxTokenizer
+
+    block_dir = tmp_path / "general_instruction"
+    block_dir.mkdir()
+    (block_dir / "v1.j2").write_text("word " * 50, encoding="utf-8")
+
+    config = PromptingConfig(blocks_dir=str(tmp_path), blocks=["general_instruction"],
+                              token_limit=5)
+    result = PromptBuilder(config, ApproxTokenizer()).build(task="t", context={})
+
+    assert result is None  # 50 words don't fit a 5-token budget
