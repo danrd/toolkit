@@ -148,3 +148,66 @@ def test_build_openrouter_runner_reads_models_and_settings_from_llm_config(monke
     assert runner.generation_kwargs == {"temperature": 0.0}
     assert _FakeOpenAI.last_kwargs["max_retries"] == 5
     assert _FakeOpenAI.last_kwargs["timeout"] == 12.0
+
+
+class _DeadProcess:
+    """A subprocess.Popen stand-in that has already exited."""
+    returncode = 137
+
+    def poll(self):
+        return self.returncode
+
+
+class _LiveProcess:
+    def poll(self):
+        return None  # still running
+
+
+class _RefusingClient:
+    """Fails the way the openai client does when nothing is listening on
+    the port."""
+
+    def __init__(self):
+        def refuse(**kwargs):
+            raise ConnectionError("[Errno 111] Connection refused")
+
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=refuse))
+
+
+def test_generate_explains_a_server_that_exited(monkeypatch):
+    """Regression test for the notebook restart case: interrupting the
+    cell sends the interrupt to the whole process group, killing the
+    server while this runner object survives. Re-running then failed deep
+    inside httpx with a bare "Connection refused" - naming neither the
+    dead server nor the way out."""
+    runner = ServerRunner(process=_DeadProcess(), port=8001, model_name="fake",
+                           generation_kwargs={}, client=_RefusingClient())
+
+    with pytest.raises(RuntimeError) as excinfo:
+        runner.generate("hello")
+
+    message = str(excinfo.value)
+    assert "8001" in message
+    assert "137" in message                    # the exit code it actually died with
+    assert "build_runner" in message           # what to do about it
+    assert isinstance(excinfo.value.__cause__, ConnectionError)  # original kept
+
+
+def test_generate_reraises_untouched_when_the_server_is_alive():
+    """A live server refusing one request is a different problem - it must
+    not be relabelled as "the server is gone"."""
+    runner = ServerRunner(process=_LiveProcess(), port=8001, model_name="fake",
+                           generation_kwargs={}, client=_RefusingClient())
+
+    with pytest.raises(ConnectionError):
+        runner.generate("hello")
+
+
+def test_generate_reraises_untouched_for_an_externally_managed_server():
+    """process=None means the server isn't ours to diagnose - there's no
+    exit code to report, so the original error stands."""
+    runner = ServerRunner(process=None, port=8001, model_name="fake",
+                           generation_kwargs={}, client=_RefusingClient())
+
+    with pytest.raises(ConnectionError):
+        runner.generate("hello")

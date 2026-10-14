@@ -587,3 +587,152 @@ def test_start_vllm_server_omits_enforce_eager_by_default(tmp_path, monkeypatch)
 
     args = mock_popen.call_args[0][0]
     assert "--enforce-eager" not in args
+
+
+def test_start_llama_cpp_server_passes_the_load_settings_from_the_config(tmp_path, monkeypatch):
+    """Every LlmConfig field the server understands reaches the process.
+
+    The spawn command carried "--use_mlock True" and nothing else, so
+    n_gpu_layers was set in the config, printed back by
+    _report_runner_started, and then dropped on the way to the server. The
+    model loads entirely on the CPU whatever the setting says, and nothing
+    in the log distinguishes a setting that went missing from one the
+    backend could not honour - which on a CUDA-less build is the other
+    reason for the same symptom.
+    """
+    monkeypatch.chdir(tmp_path)
+    config = _fake_server_config(tmp_path)
+    config.llm.n_gpu_layers = 40
+    config.llm.n_tokens_batch = 256
+    config.llm.use_mlock = False
+    config.llm.flash_attn = True
+    config.llm.type_k = "q8_0"
+    config.llm.type_v = "q8_0"
+    config.llm.split_mode = 1
+    config.llm.tensor_split = [0.5, 0.5]
+
+    with patch("subprocess.Popen") as mock_popen:
+        _start_llama_cpp_server(config)
+
+    args = mock_popen.call_args[0][0]
+    assert args[args.index("--n_gpu_layers") + 1] == "40"
+    assert args[args.index("--n_batch") + 1] == "256"
+    assert args[args.index("--use_mlock") + 1] == "False"
+    assert args[args.index("--flash_attn") + 1] == "True"
+    assert args[args.index("--type_k") + 1] == "q8_0"
+    assert args[args.index("--split_mode") + 1] == "1"
+    # One flag per share, which is how the server's CLI takes a list.
+    assert [args[i + 1] for i, a in enumerate(args) if a == "--tensor_split"] == ["0.5", "0.5"]
+
+
+def test_start_llama_cpp_server_omits_the_settings_left_unset(tmp_path, monkeypatch):
+    """A config naming none of the optional knobs spawns the command it
+    always did, so llama.cpp's own defaults stand rather than this repo's
+    idea of them."""
+    monkeypatch.chdir(tmp_path)
+    config = _fake_server_config(tmp_path)
+
+    with patch("subprocess.Popen") as mock_popen:
+        _start_llama_cpp_server(config)
+
+    args = mock_popen.call_args[0][0]
+    for flag in ("--flash_attn", "--type_k", "--type_v", "--split_mode",
+                 "--main_gpu", "--n_threads", "--tensor_split"):
+        assert flag not in args
+
+
+def test_start_llama_cpp_server_passes_n_gpu_layers_of_zero(tmp_path, monkeypatch):
+    """0 is a real value - "everything on the CPU" - and skipping the flag
+    when it is falsy would make an explicit 0 indistinguishable from an
+    unset field."""
+    monkeypatch.chdir(tmp_path)
+    config = _fake_server_config(tmp_path)
+    config.llm.n_gpu_layers = 0
+
+    with patch("subprocess.Popen") as mock_popen:
+        _start_llama_cpp_server(config)
+
+    args = mock_popen.call_args[0][0]
+    assert args[args.index("--n_gpu_layers") + 1] == "0"
+
+
+def test_setup_llama_cpp_model_passes_the_optional_load_settings(monkeypatch):
+    """The in-process tier already forwarded n_gpu_layers; these are the
+    knobs that decide whether the offloaded layers fit."""
+    captured = {}
+
+    class FakeLlama:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setitem(sys.modules, "llama_cpp", SimpleNamespace(Llama=FakeLlama))
+    config = SimpleNamespace(
+        llm=LlmConfig(max_context=9000, n_gpu_layers=40, flash_attn=True,
+                      type_k="q8_0", type_v="q8_0", split_mode=1),
+        base=BaseConfig(), generation=SimpleNamespace(max_tokens=64))
+
+    setup_llama_cpp_model("fake/path.gguf", config=config)
+
+    assert captured["n_gpu_layers"] == 40
+    assert captured["flash_attn"] is True
+    assert captured["type_k"] == "q8_0"
+    assert captured["split_mode"] == 1
+
+
+def test_setup_llama_cpp_model_omits_the_optional_settings_left_unset(monkeypatch):
+    """Not passed at all rather than passed as None - Llama reads None as a
+    value for some of these, so forwarding it would override its default
+    with nothing."""
+    captured = {}
+
+    class FakeLlama:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setitem(sys.modules, "llama_cpp", SimpleNamespace(Llama=FakeLlama))
+    config = SimpleNamespace(llm=LlmConfig(max_context=9000), base=BaseConfig(),
+                              generation=SimpleNamespace(max_tokens=64))
+
+    setup_llama_cpp_model("fake/path.gguf", config=config)
+
+    for name in ("flash_attn", "type_k", "type_v", "split_mode", "main_gpu",
+                 "tensor_split", "n_threads"):
+        assert name not in captured
+
+
+def _with_prompt_budget(config, token_limit, max_tokens):
+    config.prompt = SimpleNamespace(token_limit=token_limit)
+    config.generation.max_tokens = max_tokens
+    return config
+
+
+def test_a_prompt_budget_that_can_outgrow_the_context_is_warned_about(tmp_path, monkeypatch):
+    """The builder's token_limit is raised for a 30 x 30 task and n_ctx is
+    not: the server is then loaded with a window the prompt and its answer
+    can overflow, and says nothing useful when they do."""
+    monkeypatch.chdir(tmp_path)
+    config = _with_prompt_budget(_fake_server_config(tmp_path), token_limit=12000, max_tokens=2048)
+    config.llm.n_ctx = 9000
+
+    with patch("subprocess.Popen"), pytest.warns(UserWarning, match=r"14048 tokens.*n_ctx=9000"):
+        _start_llama_cpp_server(config)
+
+
+def test_a_prompt_budget_that_fits_the_context_is_not_warned_about(tmp_path, monkeypatch):
+    import warnings
+    monkeypatch.chdir(tmp_path)
+    config = _with_prompt_budget(_fake_server_config(tmp_path), token_limit=7000, max_tokens=2000)
+    config.llm.n_ctx = 9000
+
+    with patch("subprocess.Popen"), warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _start_llama_cpp_server(config)
+
+
+def test_the_context_check_falls_back_to_max_context_when_n_ctx_is_unset(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    config = _with_prompt_budget(_fake_server_config(tmp_path), token_limit=9000, max_tokens=1000)
+    config.llm.max_context = 9000
+
+    with patch("subprocess.Popen"), pytest.warns(UserWarning, match="10000 tokens"):
+        _start_llama_cpp_server(config)

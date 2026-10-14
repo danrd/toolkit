@@ -297,11 +297,37 @@ class ServerRunner(BaseRunner):
                                    timeout=self.request_timeout)
         return self._client
 
+    def _server_exit_code(self) -> Optional[int]:
+        """The exit code of the server process this runner started, or None
+        if it's still running (or was never ours to begin with - a caller
+        can point a ServerRunner at an externally-managed server by passing
+        process=None)."""
+        if self.process is None:
+            return None
+        return self.process.poll()
+
     def generate(self, prompt: str) -> str:
         messages = [{"role": "user", "content": prompt}]
-        response = self.client.chat.completions.create(
-            model=self.model_name, messages=messages, **self.generation_kwargs,
-        )
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name, messages=messages, **self.generation_kwargs,
+            )
+        except Exception as exc:
+            # A connection error here is almost always the server being gone
+            # rather than a transient network problem - it's a local process
+            # on 127.0.0.1. Saying so beats an httpx "Connection refused"
+            # traceback that names neither the server nor the way out.
+            exit_code = self._server_exit_code()
+            if exit_code is not None:
+                raise RuntimeError(
+                    f"The local server this runner talks to (127.0.0.1:{self.port}) has "
+                    f"exited with code {exit_code}, so the runner now points at a dead port. "
+                    "Interrupting a notebook cell sends the interrupt to the whole process "
+                    "group, which takes the server down with it while this object survives - "
+                    "so re-running the same cell fails here rather than where it stopped. "
+                    "Build a fresh runner (llm_kit.llm_setup.build_runner) before retrying."
+                ) from exc
+            raise
         return response.choices[0].message.content
 
     def close(self) -> None:

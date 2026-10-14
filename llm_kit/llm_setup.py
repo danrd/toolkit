@@ -31,6 +31,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import warnings
 from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict
@@ -87,6 +88,20 @@ class LlmConfig(BaseModel):
     n_tokens_batch: int = 512
     use_mlock: bool = True
     n_gpu_layers: int = 0
+    # The rest of the llama.cpp load-time knobs. All optional and unset by
+    # default, so a config that names none of them spawns the same command
+    # as before. They matter together rather than separately: offloading a
+    # model that only just fits means finding VRAM for its layers, and
+    # these are where it comes from - flash attention shrinks the compute
+    # buffer, quantizing the KV cache halves it, and split_mode decides how
+    # the layers are spread when there is more than one card.
+    flash_attn: Optional[bool] = None
+    type_k: Optional[str] = None  # KV cache dtype, e.g. "q8_0" - halves the cache against f16
+    type_v: Optional[str] = None
+    split_mode: Optional[int] = None  # 0 none, 1 layer, 2 row (llama.cpp's LLAMA_SPLIT_MODE_*)
+    main_gpu: Optional[int] = None
+    tensor_split: Optional[List[float]] = None  # per-GPU share; defaults to an even split
+    n_threads: Optional[int] = None
     tensor_parallel_size: int = 1  # vLLM: shard the model across this many GPUs
     gpu_memory_utilization: Optional[float] = None  # vLLM: fraction of VRAM to reserve (default 0.9)
     enforce_eager: bool = False  # vLLM: skip CUDA graph capture - trades latency for headroom on tight-VRAM cards
@@ -138,6 +153,29 @@ def resolve_local_model_path(config) -> str:
     return hf_hub_download(repo_id=model, filename=quant_file, local_dir=local_dir)
 
 
+def _warn_if_prompt_can_overflow(config, n_ctx) -> None:
+    """Warn when a prompt the builder lets through, and the answer after it,
+    can be longer than the context the model is loaded with.
+
+    The builder's budget (prompt.token_limit) and the model's window (n_ctx)
+    are two settings, and raising the first - as a 30 x 30 task needs - leaves
+    the second where it was. The server is started with the second, and a
+    request past it does not come back as "too long": llama.cpp's server has
+    been seen to fail on one with "could not broadcast input array from shape
+    (<vocab>,) into shape (0,)", an error that names neither setting.
+    """
+    budget = getattr(getattr(config, "prompt", None), "token_limit", None)
+    answer = getattr(getattr(config, "generation", None), "max_tokens", None)
+    if budget is None or answer is None or not n_ctx or int(budget) + int(answer) <= int(n_ctx):
+        return
+    warnings.warn(
+        f"prompt.token_limit={budget} plus generation.max_tokens={answer} is {int(budget) + int(answer)} "
+        f"tokens, more than the context the model is loaded with (n_ctx={n_ctx}). A prompt near the limit "
+        f"may fail on the server with an unrelated error. Raise llm.n_ctx (or llm.max_context) to at least "
+        f"{int(budget) + int(answer)}, or lower prompt.token_limit or generation.max_tokens.",
+        stacklevel=2)
+
+
 def _start_llama_cpp_server(config) -> subprocess.Popen:
     # llama-cpp-python[server] is a declared dependency (pyproject.toml's
     # `llama-cpp` extra) - unlike vllm below, its wheels aren't
@@ -151,10 +189,38 @@ def _start_llama_cpp_server(config) -> subprocess.Popen:
     n_ctx = str(getattr(config.llm, "n_ctx", None)
                 or getattr(config.llm, "max_context", None)
                 or getattr(config.generation, "max_tokens", 2048))
+    _warn_if_prompt_can_overflow(config, n_ctx)
     log_file = open("llama_cpp.log", "w", encoding="utf-8")
 
     args = [sys.executable, "-m", "llama_cpp.server", "--model", resolve_local_model_path(config),
-            "--port", str(port), "--use_mlock", "True", "--n_ctx", n_ctx]
+            "--port", str(port), "--n_ctx", n_ctx]
+
+    # From the config, not hardcoded. This command carried "--use_mlock True"
+    # and nothing else, so every other LlmConfig field the server understands
+    # - n_gpu_layers above all - was set, reported by _report_runner_started,
+    # and silently dropped on the way to the process. A model loads entirely
+    # on the CPU no matter what n_gpu_layers says, and the log gives no hint
+    # that a setting went missing rather than being disobeyed.
+    for flag, value in (
+        ("--n_gpu_layers", getattr(config.llm, "n_gpu_layers", None)),
+        ("--n_batch", getattr(config.llm, "n_tokens_batch", None)),
+        ("--use_mlock", getattr(config.llm, "use_mlock", None)),
+        ("--flash_attn", getattr(config.llm, "flash_attn", None)),
+        ("--type_k", getattr(config.llm, "type_k", None)),
+        ("--type_v", getattr(config.llm, "type_v", None)),
+        ("--split_mode", getattr(config.llm, "split_mode", None)),
+        ("--main_gpu", getattr(config.llm, "main_gpu", None)),
+        ("--n_threads", getattr(config.llm, "n_threads", None)),
+    ):
+        # `is not None`, not truthiness: 0 is a meaningful value for every
+        # numeric one here, and False is the point of the boolean ones.
+        if value is not None:
+            args += [flag, str(value)]
+
+    # One flag per element, which is how the server's CLI takes a list.
+    for share in getattr(config.llm, "tensor_split", None) or []:
+        args += ["--tensor_split", str(share)]
+
     # llama-cpp-python's server applies chat_template_kwargs at model-load
     # time, not per request - unlike a generic OpenAI-compatible server,
     # so it has to travel as a CLI flag here rather than through
@@ -273,15 +339,30 @@ def setup_llama_cpp_model(model_path: str, config=None, tokenizer_id: Optional[s
     base_cfg = getattr(config, "base", config) if config is not None else object()
     gen_cfg = getattr(config, "generation", config) if config is not None else object()
 
+    # The optional knobs are passed only when set, so Llama's own defaults
+    # stand otherwise - naming them explicitly here would pin this tier to
+    # whatever llama-cpp-python's defaults happen to be today.
+    optional = {
+        "flash_attn": getattr(llm_cfg, "flash_attn", None),
+        "type_k": getattr(llm_cfg, "type_k", None),
+        "type_v": getattr(llm_cfg, "type_v", None),
+        "split_mode": getattr(llm_cfg, "split_mode", None),
+        "main_gpu": getattr(llm_cfg, "main_gpu", None),
+        "tensor_split": getattr(llm_cfg, "tensor_split", None),
+        "n_threads": getattr(llm_cfg, "n_threads", None),
+    }
+    n_ctx = (getattr(llm_cfg, "n_ctx", None)
+             or getattr(llm_cfg, "max_context", None)
+             or getattr(gen_cfg, "max_tokens", 2048))
+    _warn_if_prompt_can_overflow(config, n_ctx)
     model = Llama(
         model_path=model_path,
-        n_ctx=(getattr(llm_cfg, "n_ctx", None)
-               or getattr(llm_cfg, "max_context", None)
-               or getattr(gen_cfg, "max_tokens", 2048)),
+        n_ctx=n_ctx,
         n_batch=getattr(llm_cfg, "n_tokens_batch", 512),
         use_mlock=getattr(llm_cfg, "use_mlock", True),
         n_gpu_layers=getattr(llm_cfg, "n_gpu_layers", 0),
         verbose=getattr(base_cfg, "verbose", False),
+        **{name: value for name, value in optional.items() if value is not None},
     )
     return model, tokenizer
 
@@ -294,6 +375,12 @@ def setup_llama_cpp_model(model_path: str, config=None, tokenizer_id: Optional[s
 # a server-load-time setting (llama.cpp) or a per-request extra_body field
 # (vLLM's OpenAI-compatible server); every in-process tier just ignores it.
 _CHAT_TEMPLATE_KWARGS_TIERS = {"llama.cpp server", "vLLM server"}
+#: n_gpu_layers is llama.cpp's way of splitting a model between CPU and GPU.
+#: The vLLM and HF tiers place the model themselves and have no equivalent,
+#: so the setting is not disobeyed there so much as meaningless - worth
+#: saying, because the fallback chain can land on one of them without the
+#: caller choosing it.
+_N_GPU_LAYERS_TIERS = {"llama.cpp server", "llama.cpp in-process"}
 _LOG_ERROR_PATTERN = re.compile(r"\b(error|exception|traceback|out of memory)\b", re.IGNORECASE)
 # A genuine error/traceback line is short. A model's chat template is
 # itself full of matching words - Qwen's, for instance, calls a Jinja
@@ -333,6 +420,7 @@ def _report_runner_started(tier: str, config, process: Optional[subprocess.Popen
         "device": getattr(config.base, "device", None),
         "tensor_parallel_size": getattr(config.llm, "tensor_parallel_size", None),
         "max_context": getattr(config.llm, "max_context", None),
+        "n_gpu_layers": getattr(config.llm, "n_gpu_layers", None) or None,
         "gpu_memory_utilization": getattr(config.llm, "gpu_memory_utilization", None),
         "enforce_eager": getattr(config.llm, "enforce_eager", None),
     }
@@ -344,6 +432,11 @@ def _report_runner_started(tier: str, config, process: Optional[subprocess.Popen
     if chat_template_kwargs and tier not in _CHAT_TEMPLATE_KWARGS_TIERS:
         print(f"[llm_setup] WARNING: generation.chat_template_kwargs={chat_template_kwargs} "
               f"is only applied by the server tiers - {tier} ignores it silently.")
+
+    n_gpu_layers = getattr(config.llm, "n_gpu_layers", 0)
+    if n_gpu_layers and tier not in _N_GPU_LAYERS_TIERS:
+        print(f"[llm_setup] WARNING: llm.n_gpu_layers={n_gpu_layers} is a llama.cpp "
+              f"setting - {tier} places the model itself and ignores it.")
 
     if process is not None and getattr(process, "log_file", None):
         errors = _scan_log_for_errors(process.log_file.name)

@@ -22,6 +22,27 @@ from jinja2.exceptions import TemplateAssertionError, UndefinedError
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class _Omit:
+    """Sentinel a resolver returns when it has nothing to say for this task.
+
+    Distinct from None, which build() reads as "this prompt cannot be made"
+    and answers with None - and llm_run reads that as "skipped, prompt
+    didn't fit token_limit" and drops the task from the run. A block with
+    nothing to say is not a prompt that cannot be made, and conflating the
+    two loses tasks silently: every task whose analysis found nothing
+    disappeared from a run rather than being asked without that block.
+    """
+
+    def __repr__(self):
+        return "OMIT"
+
+    def __bool__(self):
+        return False
+
+
+OMIT = _Omit()
+
+
 class BlockSpec(BaseModel):
     """Prompt block specification."""
     name: str
@@ -202,7 +223,8 @@ class PromptBuilder:
         suppress a configured prefix for one call. Works whether or not
         config.chat_template is set - see _join.
         Returns None if the prompt can't fit within token_limit (even after
-        trimming the examples block down to `min_examples`).
+        trimming the examples block down to `min_examples`). A resolver that
+        returns OMIT leaves its block out instead (see OMIT).
         """
         context = context or {}
         overrides = {**self.config.block_overrides, **(overrides or {})}
@@ -226,6 +248,8 @@ class PromptBuilder:
                         f"blocks; check {resolver.__module__}.{resolver.__qualname__} "
                         f"for what context it expects.",
                     ) from e
+                if rendered is OMIT:
+                    continue  # nothing to say here; the rest of the prompt stands
                 if rendered is None:
                     return None  # this resolver couldn't fit even its minimum
             else:

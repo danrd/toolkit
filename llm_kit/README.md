@@ -1,7 +1,7 @@
 # llm_kit
 
 Reusable LLM pipeline toolkit, originally extracted from the
-`subsymbolic/` module of the ARC-AGI project, now the canonical source -
+`subsymbolic/` module of the ARC-AGI project, now the canonical source (last caught up with arc-agi's working copy of these files in October 2026) -
 `lector`/`maestro` depend on this directly; `arc-agi`'s own
 `subsymbolic/llm_setup.py` etc. stay a physical copy, kept in sync via a
 script rather than a live dependency (see arc-agi's own

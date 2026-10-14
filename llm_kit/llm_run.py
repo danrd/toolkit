@@ -87,6 +87,25 @@ class WandbLogConfig(BaseModel):
     checkpoint_interval: int = Field(default=1, ge=1)
 
 
+class LlmRunSummary(dict):
+    """What run_llm_over_tasks returns: still a plain dict (so
+    summary["results"], ["solved_tasks"], ["avg_score"] all work as
+    before), with one thing changed - how it prints.
+
+    "results" holds every task's full prompt text and full raw generation,
+    which is exactly what you want to have and exactly what you don't want
+    printed. A notebook auto-displays the value of a call that wasn't
+    assigned to anything, so finishing a run dumped the whole thing - every
+    prompt, every generation - into the cell output. Showing the headline
+    numbers instead loses nothing: the data is still under the same keys.
+    """
+
+    def __repr__(self) -> str:
+        return (f"LlmRunSummary(tasks={len(self.get('results', []))}, "
+                f"solved={len(self.get('solved_tasks', []))}, "
+                f"avg_score={self.get('avg_score', 0.0):.3f})")
+
+
 def _print_debug_task_info(task, prompt: str, generation: str, eval_result: EvalResult,
                             processing_time_min: float) -> None:
     """debug=True's per-task dump - the full raw generation, not just the
@@ -188,7 +207,10 @@ def run_llm_over_tasks(
           ids (not just "summary/total_solved"'s count) as a run summary
           value.
 
-    Returns {"results": [...], "solved_tasks": [...], "avg_score": float}.
+    Returns an LlmRunSummary - a dict of {"results": [...],
+    "solved_tasks": [...], "avg_score": float} that prints as a one-line
+    headline rather than dumping every prompt and generation when a
+    notebook auto-displays it.
     """
     log_config = log_config or WandbLogConfig()
     context_builder = context_builder or (lambda task: {})
@@ -204,8 +226,16 @@ def run_llm_over_tasks(
     if not debug:
         import wandb  # lazy: debug runs (and just constructing WandbLogConfig/EvalResult) shouldn't require wandb installed
         config_dict = {"run_description": run_description, **(extra_config or {})}
+        # Resume only when there is something to resume. Passing resume= with
+        # no id still makes wandb ask the server for the resume status of the
+        # id it just generated - a call that answers nothing and fails the
+        # whole run if it cannot be made. And "must" rather than "allow": an
+        # id that names no run means the caller mistyped it or is pointing at
+        # the wrong project, and starting a fresh run under that id instead
+        # would silently redo work they asked to continue.
+        resume_kwargs = {"resume": "must", "id": run_id} if run_id else {}
         run = wandb.init(project=log_config.project, name=run_name, group=log_config.group,
-                          config=config_dict, resume="allow", id=run_id)
+                          config=config_dict, **resume_kwargs)
         # log_mode="MUTABLE": this table is logged repeatedly (once per checkpoint)
         # after further add_data() calls in between - wandb's default IMMUTABLE mode
         # would silently drop everything past the first log() for the same table.
@@ -261,7 +291,12 @@ def run_llm_over_tasks(
         elif show_progress:
             task_index = getattr(task, "index", None)
             task_label = f"task {task_index} ({task_id})" if task_index is not None else f"task {task_id}"
-            print(f"{task_label}: score={eval_result.primary_score:.3f} solved={eval_result.solved}")
+            # Time per task belongs on the progress line as much as the
+            # score: it is the number that says a backend swapped under a
+            # run, and reading it afterwards means opening the checkpoint.
+            print(f"{task_label}: score={eval_result.primary_score:.3f} "
+                  f"solved={eval_result.solved} "
+                  f"time={processing_time_min:.2f}min")
 
         if (debug or show_progress) and fig is not None:
             import matplotlib.pyplot as plt  # lazy: opt-in, plotting shouldn't be a hard dependency otherwise
@@ -300,4 +335,4 @@ def run_llm_over_tasks(
     if not debug:
         wandb.finish()
     avg_score = float(sum(r["primary_score"] for r in all_results) / len(all_results)) if all_results else 0.0
-    return {"results": all_results, "solved_tasks": solved_tasks, "avg_score": avg_score}
+    return LlmRunSummary(results=all_results, solved_tasks=solved_tasks, avg_score=avg_score)

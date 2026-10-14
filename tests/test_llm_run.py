@@ -1,20 +1,24 @@
-"""Tests for llm_kit/llm_run.py, the generic task-processing loop.
+"""Tests for llm_kit/llm_run.py (the generic task-processing loop) and
+llm_kit/arc_evaluators.py (the ARC-specific default evaluator).
 
 wandb needs a real account/network for its normal path, so these tests run
 against a FakeWandb stand-in (persists "artifacts" to a local tmp dir, no
-network) installed into sys.modules - both llm_run.py and llm_kit/logging.py
-`import wandb` lazily inside the functions that use it, so patching
-sys.modules["wandb"] is what actually takes effect for either of them, not
-patching a module-level attribute.
+network) installed into sys.modules - both llm_run.py and
+llm_kit/logging.py `import wandb` lazily inside the functions that use
+it, so patching sys.modules["wandb"] is what actually takes effect for
+either of them, not patching a module-level attribute.
 """
 from __future__ import annotations
 
 import os
 import sys
-import types
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import pandas as pd
+import re
+
 import pytest
 
 from llm_kit.llm_run import EvalResult, WandbLogConfig, run_llm_over_tasks
@@ -49,7 +53,28 @@ class _FakeArtifact:
         return self._dir
 
 
+class _FakeLogged:
+    """What run.log_artifact returns: the artifact being uploaded, with the version it will have."""
+
+    def __init__(self, artifact, version):
+        self.artifact, self.version = artifact, version
+
+    def wait(self):
+        return self
+
+
+class _FakeVersion:
+    def __init__(self, version, deleted):
+        self.version, self._deleted = version, deleted
+
+    def delete(self, delete_aliases=False):
+        self._deleted.append((self.version, delete_aliases))
+
+
 class _FakeRun:
+    entity = "fake-entity"
+    project = "fake-project"
+
     def __init__(self, run_id, artifact_root):
         self.id = run_id or "fake-run-id"
         self._artifact_root = artifact_root
@@ -63,7 +88,9 @@ class _FakeRun:
         return _FakeArtifact(base_name, type, storage_dir)
 
     def log_artifact(self, artifact):
+        number = sum(a.type == artifact.type for a in self.logged_artifacts)
         self.logged_artifacts.append(artifact)
+        return _FakeLogged(artifact, version=f"v{number}")
 
 
 class _FakeTable:
@@ -92,6 +119,7 @@ class FakeWandb:
         self.run: Optional[_FakeRun] = None
         self.logged: List[Dict[str, Any]] = []
         self.finished = False
+        self.deleted: List[Any] = []
         self.init_kwargs: Dict[str, Any] = {}
 
     def init(self, **kwargs):
@@ -108,6 +136,15 @@ class FakeWandb:
     def log(self, payload):
         self.logged.append(payload)
 
+    def Api(self):
+        return self
+
+    def artifacts(self, type_name, name):
+        """The versions of the checkpoint collection, as many as the run has logged so far."""
+        self.asked = (type_name, name)
+        saved = [a for a in self.run.logged_artifacts if a.type == "checkpoint"]
+        return [_FakeVersion(f"v{i}", self.deleted) for i in range(len(saved))]
+
     def finish(self):
         self.finished = True
 
@@ -119,7 +156,7 @@ def fake_wandb(tmp_path, monkeypatch):
     return fake
 
 
-# -- fake llm_module ---------------------------------------------------
+# -- fake SubsymbolicModule ---------------------------------------------------
 
 class _FakeBuilder:
     def __init__(self, prompts: Dict[str, Optional[str]]):
@@ -380,6 +417,37 @@ def test_run_llm_over_tasks_sends_run_description_to_wandb_config_and_results(fa
     assert summary["results"][0]["run_description"] == "baseline sweep"
 
 
+def test_a_fresh_run_does_not_ask_wandb_to_resume(fake_wandb):
+    """resume= was passed whatever run_id held. With no id wandb generates
+    one and then asks the server for *its* resume status - a call that can
+    only answer "no such run", and that takes the whole run down with it
+    when the server is unreachable (a proxy answering 403, an expired key).
+    """
+    module = _fake_module({"t1": "prompt-1"}, {"prompt-1": "CORRECT"})
+
+    run_llm_over_tasks(tasks=[_FakeTask("t1")], llm_module=module,
+                        evaluator=_exact_match_evaluator,
+                        log_config=WandbLogConfig(project="test-proj"), run_id=None)
+
+    assert "resume" not in fake_wandb.init_kwargs
+    assert "id" not in fake_wandb.init_kwargs
+
+
+def test_resuming_a_named_run_demands_that_run(fake_wandb):
+    """The opposite case: an id was given, so the run has to be the one it
+    names. Under resume="allow" an id naming no run starts a fresh one under
+    that id, and the caller silently redoes the work they asked to continue.
+    """
+    module = _fake_module({"t1": "prompt-1"}, {"prompt-1": "CORRECT"})
+
+    run_llm_over_tasks(tasks=[_FakeTask("t1")], llm_module=module,
+                        evaluator=_exact_match_evaluator,
+                        log_config=WandbLogConfig(project="test-proj"), run_id="resume-me")
+
+    assert fake_wandb.init_kwargs["id"] == "resume-me"
+    assert fake_wandb.init_kwargs["resume"] == "must"
+
+
 def test_run_llm_over_tasks_skips_prompt_that_doesnt_fit(fake_wandb):
     prompts = {"t1": None}  # PromptBuilder.build() returns None when it doesn't fit token_limit
     module = _fake_module(prompts, generations={})
@@ -431,12 +499,25 @@ def test_run_llm_over_tasks_resume_skips_already_processed_tasks(fake_wandb):
     assert summary["solved_tasks"] == ["t1"]
 
 
+def test_run_llm_over_tasks_resume_with_no_prior_checkpoint_does_not_crash(fake_wandb):
+    """Regression test: load_checkpoint_from_wandb returns None when no
+    checkpoint artifact exists yet - the original script's `checkpoint.get(...)`
+    on that None would have raised AttributeError."""
+    module = _fake_module({"t1": "prompt-1"}, {"prompt-1": "CORRECT"})
+
+    summary = run_llm_over_tasks(
+        tasks=[_FakeTask("t1")], llm_module=module, evaluator=_exact_match_evaluator,
+        log_config=WandbLogConfig(project="test-proj"),
+        run_id="never-run-before",
+    )
+
+    assert summary["solved_tasks"] == ["t1"]
+
+
 def test_show_progress_prints_score_and_shows_plot_once(fake_wandb, monkeypatch):
     """result_plotter is built once and reused for both the inline display
     and the wandb log, and matplotlib is only touched when
-    show_progress+a plotter actually asked for it. matplotlib isn't a
-    llm_kit dependency, so a fake stand-in is installed into sys.modules
-    rather than requiring a real install (same approach as fake_wandb)."""
+    show_progress+a plotter actually asked for it."""
     prompts = {"t1": "prompt-1"}
     generations = {"prompt-1": "CORRECT"}
     module = _fake_module(prompts, generations)
@@ -448,10 +529,8 @@ def test_show_progress_prints_score_and_shows_plot_once(fake_wandb, monkeypatch)
         return "FIGURE"
 
     shown = []
-    fake_pyplot = types.SimpleNamespace(show=lambda: shown.append(True))
-    fake_matplotlib = types.SimpleNamespace(pyplot=fake_pyplot)
-    monkeypatch.setitem(sys.modules, "matplotlib", fake_matplotlib)
-    monkeypatch.setitem(sys.modules, "matplotlib.pyplot", fake_pyplot)
+    import matplotlib.pyplot as plt
+    monkeypatch.setattr(plt, "show", lambda: shown.append(True))
 
     run_llm_over_tasks(
         tasks=[_FakeTask("t1")], llm_module=module, evaluator=_exact_match_evaluator,
@@ -479,11 +558,30 @@ def test_show_progress_prints_the_score_line(fake_wandb, capsys):
     assert "task t1: score=1.000 solved=True" in out
 
 
+def test_show_progress_prints_how_long_the_task_took(fake_wandb, capsys):
+    """The one number that says a backend swapped under a run: per-task time
+    in one measured pair swung 14x between shards of the same arm. Without
+    it on the progress line, reading it means opening the checkpoint after
+    the fact."""
+    prompts = {"t1": "prompt-1"}
+    generations = {"prompt-1": "CORRECT"}
+    module = _fake_module(prompts, generations)
+
+    run_llm_over_tasks(
+        tasks=[_FakeTask("t1")], llm_module=module, evaluator=_exact_match_evaluator,
+        log_config=WandbLogConfig(project="test-proj"),
+        show_progress=True,
+    )
+
+    out = capsys.readouterr().out
+    assert re.search(r"task t1: .*time=\d+\.\d\dmin", out)
+
+
 def test_show_progress_leads_with_index_when_the_task_carries_one(fake_wandb, capsys):
     """task.index is an optional, generic attribute as far as this loop is
     concerned - present here purely to check the printed line picks it up
-    when set, not because run_llm_over_tasks requires or knows about any
-    particular dataset's own task numbering."""
+    when set, not because run_llm_over_tasks requires or knows about ARC's
+    own 0..N-1 task numbering."""
     prompts = {"t1": "prompt-1"}
     generations = {"prompt-1": "CORRECT"}
     module = _fake_module(prompts, generations)
@@ -537,9 +635,9 @@ def test_debug_mode_never_imports_wandb(blocked_wandb):
 
 
 def test_debug_mode_prints_generation_but_not_the_full_prompt(blocked_wandb, capsys):
-    """The prompt is often huge (few-shot examples baked in) and rarely
-    what's being debugged once prompt-building is already trusted - only
-    its length should show up, not its full text."""
+    """The prompt is often huge (few-shot grids baked in) and rarely what's
+    being debugged once prompt-building is already trusted - only its
+    length should show up, not its full text."""
     prompts = {"t1": "a-very-long-prompt-text"}
     generations = {"a-very-long-prompt-text": "CORRECT"}
     module = _fake_module(prompts, generations)
@@ -558,9 +656,6 @@ def test_debug_mode_prints_generation_but_not_the_full_prompt(blocked_wandb, cap
 
 
 def test_debug_mode_shows_plot_when_result_plotter_is_set(blocked_wandb, monkeypatch):
-    """matplotlib isn't a llm_kit dependency, so a fake stand-in is
-    installed into sys.modules rather than requiring a real install (same
-    approach as fake_wandb / test_show_progress_prints_score_and_shows_plot_once)."""
     prompts = {"t1": "prompt-1"}
     generations = {"prompt-1": "CORRECT"}
     module = _fake_module(prompts, generations)
@@ -572,10 +667,8 @@ def test_debug_mode_shows_plot_when_result_plotter_is_set(blocked_wandb, monkeyp
         return "FIGURE"
 
     shown = []
-    fake_pyplot = types.SimpleNamespace(show=lambda: shown.append(True))
-    fake_matplotlib = types.SimpleNamespace(pyplot=fake_pyplot)
-    monkeypatch.setitem(sys.modules, "matplotlib", fake_matplotlib)
-    monkeypatch.setitem(sys.modules, "matplotlib.pyplot", fake_pyplot)
+    import matplotlib.pyplot as plt
+    monkeypatch.setattr(plt, "show", lambda: shown.append(True))
 
     run_llm_over_tasks(
         tasks=[_FakeTask("t1")], llm_module=module, evaluator=_exact_match_evaluator,
@@ -602,17 +695,99 @@ def test_debug_mode_ignores_run_id_resume(blocked_wandb):
     assert summary["results"][0]["task_id"] == "t1"
 
 
-def test_run_llm_over_tasks_resume_with_no_prior_checkpoint_does_not_crash(fake_wandb):
-    """Regression test: load_checkpoint_from_wandb returns None when no
-    checkpoint artifact exists yet - the original script's `checkpoint.get(...)`
-    on that None would have raised AttributeError."""
-    module = _fake_module({"t1": "prompt-1"}, {"prompt-1": "CORRECT"})
+# -- arc_grid_evaluator --------------------------------------------------------
 
-    summary = run_llm_over_tasks(
-        tasks=[_FakeTask("t1")], llm_module=module, evaluator=_exact_match_evaluator,
-        log_config=WandbLogConfig(project="test-proj"),
-        run_id="never-run-before",
+
+
+
+
+
+
+
+
+# -- arc_result_plotter ---------------------------------------------------
+
+
+
+
+
+
+
+# -- LlmRunSummary -------------------------------------------------------------
+
+def test_summary_prints_a_headline_not_every_prompt(fake_wandb):
+    """Regression test: the return value carries every task's full prompt
+    and full raw generation, and a notebook auto-displays the value of a
+    call that wasn't assigned - so finishing a run dumped the whole thing
+    into the cell output."""
+    from llm_kit.llm_run import LlmRunSummary
+
+    summary = LlmRunSummary(
+        results=[{"task_id": "t1", "prompt_text": "SECRET-PROMPT" * 500,
+                  "generation_result": "SECRET-GENERATION" * 500, "primary_score": 0.5}],
+        solved_tasks=["t1"],
+        avg_score=0.5,
     )
 
-    assert summary["solved_tasks"] == ["t1"]
+    text = repr(summary)
 
+    assert "SECRET-PROMPT" not in text
+    assert "SECRET-GENERATION" not in text
+    assert "tasks=1" in text and "solved=1" in text and "0.500" in text
+    assert len(text) < 100
+
+
+def test_summary_is_still_a_plain_dict(fake_wandb):
+    """The compact repr must not cost callers their subscript access."""
+    from llm_kit.llm_run import LlmRunSummary
+
+    summary = LlmRunSummary(results=[{"task_id": "t1"}], solved_tasks=["t1"], avg_score=0.5)
+
+    assert isinstance(summary, dict)
+    assert summary["results"] == [{"task_id": "t1"}]
+    assert summary["solved_tasks"] == ["t1"]
+    assert summary["avg_score"] == 0.5
+    assert dict(summary) == {"results": [{"task_id": "t1"}], "solved_tasks": ["t1"],
+                             "avg_score": 0.5}
+
+
+def test_run_llm_over_tasks_returns_a_compactly_printing_summary(fake_wandb):
+    from llm_kit.llm_run import LlmRunSummary
+
+    summary = run_llm_over_tasks(
+        tasks=[_FakeTask("t1")],
+        llm_module=_fake_module({"t1": "prompt-1"}, {"prompt-1": "CORRECT"}),
+        evaluator=_exact_match_evaluator,
+    )
+
+    assert isinstance(summary, LlmRunSummary)
+    assert repr(summary).startswith("LlmRunSummary(")
+
+
+def test_only_the_latest_checkpoint_version_is_kept(fake_wandb):
+    """A checkpoint after every task is a copy of the whole state each time; once the new version is up the
+    earlier ones are deleted, in the run's own collection."""
+    tasks = [_FakeTask(f"t{i}") for i in range(4)]
+    module = _fake_module({t.id: f"prompt-{t.id}" for t in tasks}, {f"prompt-{t.id}": "CORRECT" for t in tasks})
+    run_llm_over_tasks(tasks=tasks, llm_module=module, evaluator=_exact_match_evaluator,
+                       log_config=WandbLogConfig(project="test-proj", checkpoint_interval=1), run_id="r1")
+
+    assert fake_wandb.asked == ("checkpoint", "fake-entity/fake-project/checkpoint-r1")
+    checkpoints = [a for a in fake_wandb.run.logged_artifacts if a.type == "checkpoint"]
+    assert len(checkpoints) == 4
+    # after the n-th save the versions before the n-th go: v0 once, v0 and v1 ... in all 0+1+2+3 deletions
+    assert len(fake_wandb.deleted) == 0 + 1 + 2 + 3
+    assert all(aliases is True for _version, aliases in fake_wandb.deleted)
+    assert ("v3", True) not in fake_wandb.deleted
+
+
+def test_a_failure_to_delete_old_checkpoints_does_not_stop_the_run(fake_wandb, capsys):
+    def broken(type_name, name):
+        raise ConnectionError("offline")
+
+    fake_wandb.artifacts = broken
+    module = _fake_module({"t1": "prompt-1"}, {"prompt-1": "CORRECT"})
+    summary = run_llm_over_tasks(tasks=[_FakeTask("t1")], llm_module=module, evaluator=_exact_match_evaluator,
+                                 log_config=WandbLogConfig(project="test-proj", checkpoint_interval=1), run_id="r2")
+    assert summary["solved_tasks"] == ["t1"]
+    assert "Could not delete earlier checkpoint versions: ConnectionError" in capsys.readouterr().out
