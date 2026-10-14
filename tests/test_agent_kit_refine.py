@@ -125,3 +125,20 @@ class TestRefiningModule:
         assert refined.builder is module.builder and refined.runner == "runner"
         refined.close()
         assert module.closed
+
+
+def test_attempts_are_made_as_the_class_the_project_names():
+    from dataclasses import dataclass
+
+    @dataclass
+    class NumberAttempt(Attempt):
+        @property
+        def number_value(self):
+            return self.value
+
+    result = loop(object(), lambda c: "7", review_against(7), parse, attempt_class=NumberAttempt)
+    assert isinstance(result.attempts[0], NumberAttempt) and result.best.number_value == 7
+    module = FakeModule(["7"])
+    refined = RefiningModule(module, review_against(7), parse, attempt_class=NumberAttempt)
+    refined.solve(object())
+    assert isinstance(refined.last.attempts[0], NumberAttempt)

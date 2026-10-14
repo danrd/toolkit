@@ -24,7 +24,7 @@ better than the first.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Type
 
 from agent_kit.blocks import install_blocks
 from agent_kit.trace import Tracer
@@ -101,9 +101,12 @@ class RefineResult:
 
 
 def loop(task, ask: Callable[[Dict[str, Any]], str], review: Review, parse: Callable[[str], Any],
-         rounds: int = 3, context: Optional[Dict[str, Any]] = None) -> RefineResult:
+         rounds: int = 3, context: Optional[Dict[str, Any]] = None,
+         attempt_class: Type[Attempt] = Attempt) -> RefineResult:
     """`ask(context) -> text` up to `rounds` times; each call after the first has the attempts so far
-    in `context["history_text"]`. Stops at the first attempt nothing is found wrong with."""
+    in `context["history_text"]`. Stops at the first attempt nothing is found wrong with.
+    `attempt_class` is what each attempt is made as: a subclass of Attempt that names `value` after
+    what the project's answers are (a grid, say)."""
     attempts: List[Attempt] = []
     for _ in range(max(1, rounds)):
         call = dict(context or {})
@@ -114,7 +117,7 @@ def loop(task, ask: Callable[[Dict[str, Any]], str], review: Review, parse: Call
         text = text if isinstance(text, str) else ""
         value = parse(text) if text.strip() else None
         notes, strong, weak = review(task, value)
-        attempts.append(Attempt(len(attempts) + 1, text, value, notes, strong, weak))
+        attempts.append(attempt_class(len(attempts) + 1, text, value, notes, strong, weak))
         if attempts[-1].clean:
             break
     return RefineResult(attempts=attempts, best=best_attempt(attempts))
@@ -125,9 +128,10 @@ class RefiningModule:
     and a `.builder` whose prompt can hold a `memory` block)."""
 
     def __init__(self, module, review: Review, parse: Callable[[str], Any], rounds: int = 3,
-                 tracer: Optional[Tracer] = None):
+                 tracer: Optional[Tracer] = None, attempt_class: Type[Attempt] = Attempt):
         self.module = module
         self.review, self.parse, self.rounds, self.tracer = review, parse, rounds, tracer
+        self.attempt_class = attempt_class
         self.last: Optional[RefineResult] = None
         self.runs: List[RefineResult] = []        # every call's loop, for reading a run afterwards
         install_blocks(module, ["memory"])
@@ -154,7 +158,7 @@ class RefiningModule:
                 errors.append(str(result["module_results"]["error"]))
             return result.get("solution", "")
 
-        self.last = loop(task, ask, self.review, self.parse, self.rounds, context)
+        self.last = loop(task, ask, self.review, self.parse, self.rounds, context, self.attempt_class)
         self.runs.append(self.last)
         if not self.last.attempts or (not self.last.solution and errors):
             return {"solution": "", "module_results": {"error": errors[-1] if errors else "no answer"}}
