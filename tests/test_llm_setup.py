@@ -38,6 +38,7 @@ def test_openrouter_settings_have_sane_defaults():
     assert config.openrouter_models
     assert config.openrouter_max_retries == 2
     assert config.openrouter_request_timeout == 30.0
+    assert (config.hosted_provider, config.hosted_base_url, config.hosted_api_key_env) == ("openrouter", None, None)
 
 
 def test_tokenizer_model_can_be_set_separately_from_model():

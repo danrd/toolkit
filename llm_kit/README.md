@@ -17,15 +17,18 @@ together or separately, plus one small optional aggregator:
   imports.
 - **`llm_runtime.py` + `llm_setup.py`** — `GenerationConfig` and a family
   of `Runner` classes (`ServerRunner`, `LlamaCppRunner`, `VLLMRunner`,
-  `HFRunner`, `OpenRouterRunner`) behind one interface:
+  `HFRunner`, `HostedRunner` with `OpenRouterRunner` and `CometApiRunner`) behind one interface:
   `runner.generate(prompt: str) -> str`. `llm_setup.build_runner(config)`
   picks a local backend with a fallback chain:
   ```
   CPU:  llama.cpp server -> llama.cpp in-process
   GPU:  vLLM server -> vLLM in-process -> HF in-process (4-bit)
   ```
-  Hosted models (OpenRouter, in principle OpenAI/Anthropic/Gemini) are a
-  separate, explicit path (`OpenRouterRunner`) - never inferred from
+  Hosted models (OpenRouter, CometAPI, in principle OpenAI/Anthropic/Gemini)
+  are a separate, explicit path (`HostedRunner`; `build_hosted_runner(config)`
+  picks the service named by `llm.hosted_provider` and takes its URL and key
+  variable from `hosted_base_url`/`hosted_api_key_env` when those are set,
+  so any OpenAI-compatible service is reachable) - never inferred from
   config. Heavy dependencies (torch, transformers, llama_cpp, vllm, openai)
   are imported lazily, so importing this module never requires every
   backend's library installed.

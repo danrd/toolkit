@@ -12,8 +12,8 @@ fallback chain per config.base.device:
     GPU:  vLLM server -> vLLM in-process -> HF in-process (4-bit)
 Every tier's error is collected; if all tiers fail, RuntimeError chains them.
 
-Hosted/proprietary models (OpenRouter, and in principle OpenAI/Anthropic/
-Gemini) are NOT part of this factory - llm_kit.llm_runtime.OpenRouterRunner
+Hosted/proprietary models (OpenRouter, CometAPI, and in principle OpenAI/Anthropic/
+Gemini) are NOT part of this factory - llm_kit.llm_runtime.HostedRunner (build_hosted_runner)
 is a deliberately separate, explicit path the caller opts into directly.
 
 Heavy dependencies (torch, transformers, llama_cpp, vllm) are imported
@@ -82,6 +82,12 @@ class LlmConfig(BaseModel):
     max_context: int = 9000  # llm token limit for computational resources to control
     openrouter_models: List[str] = ["google/gemma-4-26b-a4b-it",
                                     "nvidia/nemotron-3-ultra-550b-a55b"]
+    # The three openrouter_* fields below are the hosted runners' models,
+    # retries and timeout whichever service is used (the names are older than
+    # the second service). hosted_* choose the service; see build_hosted_runner.
+    hosted_provider: str = "openrouter"
+    hosted_base_url: Optional[str] = None
+    hosted_api_key_env: Optional[str] = None
     openrouter_max_retries: int = 2
     openrouter_request_timeout: float = 30.0
     n_ctx: Optional[int] = None  # falls back to max_context, then generation.max_tokens, when unset

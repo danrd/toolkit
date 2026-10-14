@@ -4,11 +4,11 @@ One interface regardless of backend: `Runner.generate(prompt: str) -> str`.
 `prompt` is always a plain string (whatever PromptBuilder already produces,
 with or without a chat template) — the string-to-chat-messages translation
 happens only at the one boundary that actually needs it (ServerRunner /
-OpenRouterRunner talking to an OpenAI-compatible endpoint), not in every
+HostedRunner talking to an OpenAI-compatible endpoint), not in every
 caller.
 
-Hosted/proprietary models (OpenRouter, and in principle OpenAI/Anthropic/
-Gemini) are a deliberately SEPARATE, explicit path (`OpenRouterRunner`) —
+Hosted/proprietary models (OpenRouter, CometAPI, and in principle OpenAI/Anthropic/
+Gemini) are a deliberately SEPARATE, explicit path (`HostedRunner`) —
 not merged into llm_kit.llm_setup.build_runner. Whether to use local
 inference or a hosted model is the caller's decision, not something to
 infer from config.
@@ -240,8 +240,8 @@ class GenerationConfig(BaseModel):
 
 
 class AllModelsFailedError(Exception):
-    """Raised when every model in a resilience chain (e.g. OpenRouter's
-    model list) failed — never silently swallowed into a fake "sorry"
+    """Raised when every model in a resilience chain (e.g. a hosted
+    service's model list) failed — never silently swallowed into a fake "sorry"
     string that could be mistaken for a real answer downstream."""
 
 
@@ -419,23 +419,41 @@ class HFRunner(BaseRunner):
 # build_runner's local cpu/gpu selection; the caller opts into this).
 # ---------------------------------------------------------------------------
 
-class OpenRouterRunner(BaseRunner):
-    """Tries a list of OpenRouter models in order, with backoff on rate
-    limits. Raises AllModelsFailedError if every model failed — no silent
-    "service unavailable" string standing in for a real answer."""
+class HostedRunner(BaseRunner):
+    """Tries a list of models of one hosted, OpenAI-compatible service in
+    order, with backoff on rate limits. Raises AllModelsFailedError if every
+    model failed - no silent "service unavailable" string standing in for a
+    real answer.
+
+    Which service is two plain values, `base_url` and the environment
+    variable the key is read from; everything else (the fallback order, the
+    backoff, the error) is the same for any of them. OpenRouterRunner and
+    CometApiRunner below only fill those two in. Parameters a service does
+    not accept (top_k, repetition_penalty, a grammar) are the caller's to
+    leave out of `generation_kwargs`: a service that rejects an unknown
+    field fails the request, which is how the first call finds out."""
+
+    provider = "hosted"
+    default_base_url: Optional[str] = None
+    default_api_key_env: Optional[str] = None
 
     def __init__(self, models: List[str], generation_kwargs: Dict[str, Any],
                  api_key: Optional[str] = None, max_retries: int = 2,
-                 timeout: float = 30.0, client=None):
+                 timeout: float = 30.0, client=None,
+                 base_url: Optional[str] = None, api_key_env: Optional[str] = None):
         self.models = models
         self.generation_kwargs = generation_kwargs
+        self.base_url = base_url or self.default_base_url
+        self.api_key_env = api_key_env or self.default_api_key_env
         self._client = client
         if self._client is None:
-            api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
+            if not self.base_url:
+                raise ValueError(f"{type(self).__name__} needs a base_url")
+            api_key = api_key or (os.environ.get(self.api_key_env) if self.api_key_env else None)
             if not api_key:
-                raise ValueError("OPENROUTER_API_KEY is not set")
+                raise ValueError(f"{self.api_key_env or 'an API key'} is not set")
             from openai import OpenAI
-            self._client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key,
+            self._client = OpenAI(base_url=self.base_url, api_key=api_key,
                                    max_retries=max_retries, timeout=timeout)
 
     def generate(self, prompt: str) -> str:
@@ -463,17 +481,68 @@ class OpenRouterRunner(BaseRunner):
             except Exception as e:  # noqa: BLE001 - deliberately broad: keep trying remaining models
                 last_error = e
 
-        raise AllModelsFailedError(f"All {len(self.models)} OpenRouter models failed: {last_error}")
+        raise AllModelsFailedError(f"All {len(self.models)} {self.provider} models failed: {last_error}")
+
+
+class OpenRouterRunner(HostedRunner):
+    """HostedRunner for OpenRouter (https://openrouter.ai)."""
+
+    provider = "OpenRouter"
+    default_base_url = "https://openrouter.ai/api/v1"
+    default_api_key_env = "OPENROUTER_API_KEY"
+
+
+class CometApiRunner(HostedRunner):
+    """HostedRunner for CometAPI (https://www.cometapi.com), an aggregator
+    with an OpenAI-compatible endpoint. The base URL and key variable are
+    CometAPI's published defaults, not verified against a live key from
+    here: pass base_url=/api_key_env= (or set hosted_base_url /
+    hosted_api_key_env in the config) if the service says otherwise."""
+
+    provider = "CometAPI"
+    default_base_url = "https://api.cometapi.com/v1"
+    default_api_key_env = "COMETAPI_KEY"
+
+
+#: provider name (LlmConfig.hosted_provider) -> its runner class
+HOSTED_PROVIDERS = {"openrouter": OpenRouterRunner, "cometapi": CometApiRunner}
+
+
+def build_hosted_runner(config) -> HostedRunner:
+    """Construct the HostedRunner config.llm.hosted_provider names, from
+    config.llm's hosted fields (the openrouter_* ones, kept under their old
+    names for the callers that set them: models, retries, timeout) and
+    config.to_chat_completions() - the hosted counterpart to
+    llm_setup.build_runner(), but never chained into its local-backend
+    fallback: opted into explicitly, same as the runner itself (e.g. via
+    SubsymbolicModule(experiment_config, tokenizer, runner=
+    build_hosted_runner(experiment_config)) to run it alongside a
+    local module built from the same config).
+
+    `hosted_provider` is "openrouter" unless set. `hosted_base_url` and
+    `hosted_api_key_env`, when set, replace the provider's defaults - which
+    is also how any other OpenAI-compatible service is reached: name the
+    nearest provider and give its URL."""
+    llm = config.llm
+    provider = getattr(llm, "hosted_provider", "openrouter") or "openrouter"
+    try:
+        runner_class = HOSTED_PROVIDERS[provider.lower()]
+    except KeyError:
+        raise ValueError(f"unknown hosted_provider {provider!r}; known: {', '.join(sorted(HOSTED_PROVIDERS))}") from None
+    return runner_class(
+        models=llm.openrouter_models,
+        generation_kwargs=config.to_chat_completions(),
+        max_retries=llm.openrouter_max_retries,
+        timeout=llm.openrouter_request_timeout,
+        base_url=getattr(llm, "hosted_base_url", None),
+        api_key_env=getattr(llm, "hosted_api_key_env", None),
+    )
 
 
 def build_openrouter_runner(config) -> OpenRouterRunner:
     """Construct an OpenRouterRunner from config.llm's OpenRouter fields
-    and config.to_chat_completions() - the hosted counterpart to
-    llm_setup.build_runner(), but never chained into its local-backend
-    fallback: opted into explicitly, same as OpenRouterRunner itself
-    (e.g. via SubsymbolicModule(experiment_config, tokenizer, runner=
-    build_openrouter_runner(experiment_config)) to run it alongside a
-    local module built from the same config)."""
+    and config.to_chat_completions(). Kept as it was for its callers; the
+    provider-neutral entry is build_hosted_runner."""
     return OpenRouterRunner(
         models=config.llm.openrouter_models,
         generation_kwargs=config.to_chat_completions(),
